@@ -2957,7 +2957,12 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       if (err instanceof Error && err.message === "MAX_WEBHOOKS_EXCEEDED") {
         return sendError(res, 422, "Maximum 10 webhooks per profile");
       }
-      throw err;
+      if (err && typeof err === "object" && "code" in err && err.code === "P2034") {
+        req.log.warn({ err }, "retryable webhook creation serialization conflict");
+        return sendError(res, 409, "Webhook creation conflicted; please retry", "RETRYABLE_WRITE_CONFLICT");
+      }
+      req.log.error({ err }, "database error creating webhook");
+      return sendError(res, 500, "Internal server error");
     }
   });
 
@@ -4173,6 +4178,11 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       if (err instanceof Error && err.message === "MAX_MILESTONES_EXCEEDED") {
         return sendError(res, 422, "Maximum 20 active milestones per profile");
       }
+      if (err && typeof err === "object" && "code" in err && err.code === "P2034") {
+        req.log.warn({ err }, "retryable milestone creation serialization conflict");
+        return sendError(res, 409, "Milestone creation conflicted; please retry", "RETRYABLE_WRITE_CONFLICT");
+      }
+      req.log.error({ err }, "database error creating milestone");
       return sendError(res, 500, "Internal server error");
     }
   });
