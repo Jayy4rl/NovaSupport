@@ -184,7 +184,7 @@ export default async function HomePage() {
                     />
                   ) : (
                     <div className="flex h-10 w-10 items-center justify-center rounded-full bg-indigo-600 text-sm font-bold text-white">
-                      {profile.displayName.slice(0, 2).toUpperCase()}
+                      {(profile.displayName?.slice(0, 2) || "?").toUpperCase()}
                     </div>
                   )}
                   <div>
