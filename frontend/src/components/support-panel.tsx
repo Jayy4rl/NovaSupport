@@ -138,7 +138,16 @@ export function SupportPanel({
   const handleSend = useCallback(async () => {
     const parsedAmt = parseFloat(amount);
     const validAmount = !isNaN(parsedAmt) && parsedAmt > 0;
-    const parsedBal = balance ? parseFloat(balance) : 0;
+    const selectedBalStr = isXlmPayment
+      ? (visitorBalances.find((b: any) => b.asset_type === "native")
+          ?.balance ?? balance)
+      : visitorBalances.find(
+          (b: any) =>
+            b.asset_type !== "native" &&
+            b.asset_code === paymentAsset.code &&
+            (!paymentAsset.issuer || b.asset_issuer === paymentAsset.issuer),
+        )?.balance;
+    const parsedBal = selectedBalStr ? parseFloat(selectedBalStr) : 0;
     const overBalance = isXlmPayment
       ? validAmount && parsedAmt + FEE_IN_XLM > parsedBal
       : validAmount && parsedAmt > parsedBal;
@@ -240,6 +249,7 @@ export function SupportPanel({
     visitorAddress,
     amount,
     balance,
+    visitorBalances,
     sending,
     paymentAsset,
     walletAddress,
@@ -302,8 +312,23 @@ export function SupportPanel({
 
   const parsedAmount = parseFloat(amount);
   const hasValidAmount = !isNaN(parsedAmount) && parsedAmount > 0;
-  const parsedBalance = balance ? parseFloat(balance) : 0;
-  const totalNeeded = hasValidAmount ? parsedAmount + FEE_IN_XLM : 0;
+  const selectedBalanceStr = isXlmPayment
+    ? (visitorBalances.find((b: any) => b.asset_type === "native")?.balance ??
+      balance)
+    : visitorBalances.find(
+        (b: any) =>
+          b.asset_type !== "native" &&
+          b.asset_code === paymentAsset.code &&
+          (!paymentAsset.issuer || b.asset_issuer === paymentAsset.issuer),
+      )?.balance;
+  const parsedBalance = selectedBalanceStr
+    ? parseFloat(selectedBalanceStr)
+    : 0;
+  const totalNeeded = hasValidAmount
+    ? isXlmPayment
+      ? parsedAmount + FEE_IN_XLM
+      : parsedAmount
+    : 0;
   const insufficientBalance = hasValidAmount && totalNeeded > parsedBalance;
   const networkLabel = getNetworkLabel();
   const isBalanceLoading = balanceLoading;
@@ -700,8 +725,12 @@ export function SupportPanel({
       {insufficientBalance && (
         <div className="mt-4 rounded-2xl border border-red-500/20 bg-red-500/5 p-3">
           <p className="text-xs text-red-400">
-            Insufficient balance. You need at least {totalNeeded.toFixed(7)} XLM
-            (including ~{FEE_IN_XLM.toFixed(7)} XLM network fee).
+            Insufficient balance. You need at least {totalNeeded.toFixed(7)}{" "}
+            {paymentAsset.code}
+            {isXlmPayment
+              ? ` (including ~${FEE_IN_XLM.toFixed(7)} XLM network fee)`
+              : ""}
+            .
           </p>
         </div>
       )}

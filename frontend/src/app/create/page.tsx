@@ -47,7 +47,7 @@ export default function CreatePage() {
     displayName: "",
     bio: "",
     walletAddress: "",
-    acceptedAssets: ["XLM", "USDC"],
+    acceptedAssets: ["XLM"],
     twitterHandle: "",
     githubHandle: "",
     websiteUrl: "",
@@ -151,7 +151,7 @@ export default function CreatePage() {
         setError(walletValidation.error || "Please enter a valid Stellar wallet address.");
         return;
       }
-      if (form.acceptedAssets.length === 0) {
+      if (assets.length === 0) {
         setError("Please select at least one accepted asset.");
         return;
       }

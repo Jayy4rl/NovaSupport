@@ -190,7 +190,13 @@ export function ProfileTabs({ username }: { username: string }) {
     const { from, to } = preset === "custom"
       ? {
           from: customFrom ? new Date(customFrom) : null,
-          to:   customTo   ? new Date(customTo)   : null,
+          to: customTo
+            ? (() => {
+                const d = new Date(customTo);
+                d.setHours(23, 59, 59, 999);
+                return d;
+              })()
+            : null,
         }
       : getPresetRange(preset);
 
