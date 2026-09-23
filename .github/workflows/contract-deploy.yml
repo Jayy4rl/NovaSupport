@@ -60,6 +60,10 @@ jobs:
     timeout-minutes: 15
     environment: testnet
 
+    outputs:
+      network: ${{ env.NETWORK }}
+      contract_id: ${{ steps.deploy.outputs.contract_id }}
+
     env:
       NETWORK: ${{ github.event.inputs.network || 'testnet' }}
       STELLAR_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
@@ -196,7 +200,7 @@ jobs:
       - name: Post success summary
         run: |
           echo "## Deployment Succeeded" >> "$GITHUB_STEP_SUMMARY"
-          echo "Contract deployed and verified on **${{ needs.deploy.outputs.network || 'testnet' }}**." >> "$GITHUB_STEP_SUMMARY"
+          echo "Contract deployed and verified on **${{ needs.deploy.outputs.network }}**." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Send Slack notification (success)
         if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
