@@ -23,7 +23,6 @@ Key error categories:
 - **Contract state errors** (200-299): Initialization, pause state
 - **Balance and transfer errors** (300-399): Insufficient funds, withdrawal limits
 - **Storage and data errors** (400-499): Missing data, recipient not found
-- **Asset and token errors** (500-599): Invalid assets, token client issues
 
 ## Why It Is Small
 
