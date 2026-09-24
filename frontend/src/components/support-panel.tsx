@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, KeyboardEvent } from "react";
+import { useEffect, useMemo, useState, useCallback, KeyboardEvent } from "react";
 import { useToast } from "@/lib/use-toast";
 import {
   Asset as StellarAsset,
@@ -36,6 +36,29 @@ type Asset = {
 };
 
 const FEE_IN_XLM = Number(BASE_FEE) / 10_000_000;
+
+/**
+ * True when a Horizon balance line matches one of the creator's accepted
+ * assets. An accepted asset without an issuer matches any issuer for that code
+ * (native XLM never has an issuer).
+ */
+function isAcceptedBalance(balance: any, acceptedAssets: Asset[]): boolean {
+  return acceptedAssets.some((asset) => {
+    if (balance.asset_type === "native") {
+      return asset.code === "XLM" && !asset.issuer;
+    }
+    return (
+      asset.code === balance.asset_code &&
+      (!asset.issuer || asset.issuer === balance.asset_issuer)
+    );
+  });
+}
+
+function balanceKey(balance: any): string {
+  return balance.asset_type === "native"
+    ? "native"
+    : `${balance.asset_code}:${balance.asset_issuer}`;
+}
 const IS_TESTNET = STELLAR_NETWORK !== "PUBLIC";
 
 /**
@@ -317,6 +340,32 @@ export function SupportPanel({
     fetchBalances();
   }, [visitorAddress]);
 
+  // Only offer assets the creator has declared as accepted (#1128). When the
+  // creator has not configured any, fall back to the full wallet.
+  const payableBalances = useMemo(
+    () =>
+      acceptedAssets && acceptedAssets.length > 0
+        ? visitorBalances.filter((b: any) => isAcceptedBalance(b, acceptedAssets))
+        : visitorBalances,
+    [visitorBalances, acceptedAssets],
+  );
+
+  // Keep the selected asset within the payable set.
+  useEffect(() => {
+    if (payableBalances.length === 0) return;
+    const selectedKey =
+      paymentAsset.code === "XLM"
+        ? "native"
+        : `${paymentAsset.code}:${paymentAsset.issuer}`;
+    if (payableBalances.some((b: any) => balanceKey(b) === selectedKey)) return;
+    const first = payableBalances[0];
+    setPaymentAsset(
+      first.asset_type === "native"
+        ? { code: "XLM" }
+        : { code: first.asset_code, issuer: first.asset_issuer },
+    );
+  }, [payableBalances, paymentAsset]);
+
   const parsedAmount = parseFloat(amount);
   const hasValidAmount = !isNaN(parsedAmount) && parsedAmount > 0;
   const selectedBalanceStr = isXlmPayment
@@ -349,6 +398,12 @@ export function SupportPanel({
   const xlmBalance = parseFloat(
     visitorBalances.find((b) => b.asset_type === "native")?.balance ?? "0"
   );
+  const paymentAssetAccepted = payableBalances.some(
+    (b: any) =>
+      balanceKey(b) ===
+      (isXlmPayment ? "native" : `${paymentAsset.code}:${paymentAsset.issuer}`),
+  );
+
   const insufficientXlmForFee =
     !isXlmPayment && hasValidAmount && xlmBalance < FEE_IN_XLM;
 
@@ -447,9 +502,13 @@ export function SupportPanel({
           >
             Pay with
           </label>
-          {visitorBalancesLoaded && visitorBalances.length === 0 ? (
+          {visitorBalancesLoaded && payableBalances.length === 0 ? (
             <p className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-sky/60">
-              Your wallet has no supported assets. Fund your wallet to continue.
+              {visitorBalances.length === 0
+                ? "Your wallet has no supported assets. Fund your wallet to continue."
+                : `Your wallet holds none of the assets ${recipientDisplayName} accepts (${acceptedAssets
+                    ?.map((a) => a.code)
+                    .join(", ")}).`}
             </p>
           ) : (
             <select
@@ -472,18 +531,10 @@ export function SupportPanel({
               }}
               className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white focus:border-mint/50 focus:outline-none appearance-none"
             >
-              {visitorBalances.map((b: any) => (
+              {payableBalances.map((b: any) => (
                 <option
-                  key={
-                    b.asset_type === "native"
-                      ? "native"
-                      : `${b.asset_code}:${b.asset_issuer}`
-                  }
-                  value={
-                    b.asset_type === "native"
-                      ? "native"
-                      : `${b.asset_code}:${b.asset_issuer}`
-                  }
+                  key={balanceKey(b)}
+                  value={balanceKey(b)}
                   className="bg-ink text-white"
                 >
                   {b.asset_type === "native" ? "XLM" : b.asset_code} (
@@ -754,7 +805,7 @@ export function SupportPanel({
       <button
         type="button"
         onClick={handleSend}
-        disabled={!hasValidAmount || insufficientBalance || insufficientXlmForFee || sending}
+        disabled={!hasValidAmount || insufficientBalance || insufficientXlmForFee || !paymentAssetAccepted || sending}
         className="mt-6 w-full rounded-lg bg-mint px-4 py-3 text-sm font-semibold text-black hover:bg-mint/90 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
       >
         {sending ? "Sending…" : "Send Support"}
