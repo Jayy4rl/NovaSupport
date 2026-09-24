@@ -1,6 +1,6 @@
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { processPendingWebhookDeliveries } from "./webhook-processor.js";
+import { processPendingWebhookDeliveries, startWebhookProcessor } from "./webhook-processor.js";
 
 function makeDelivery(overrides: Record<string, unknown> = {}) {
   return {
@@ -67,6 +67,34 @@ test("HTTP 500 keeps status pending and sets nextRetryAt to the backoff schedule
   assert.equal(data.attemptCount, 1);
   assert.ok(data.nextRetryAt instanceof Date);
   assert.ok((data.nextRetryAt as Date).getTime() > Date.now());
+});
+
+test("Redis mode still polls SQL so due webhook retries are delivered", async () => {
+  let queueStarted = false;
+  let workerStarted = false;
+  let pollCount = 0;
+  const handle = startWebhookProcessor({
+    redisAvailable: true,
+    intervalMs: 2,
+    startQueue: () => {
+      queueStarted = true;
+      return null;
+    },
+    startWorker: () => {
+      workerStarted = true;
+      return null;
+    },
+    processPending: async () => {
+      pollCount += 1;
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  await handle.stop();
+
+  assert.equal(queueStarted, true);
+  assert.equal(workerStarted, true);
+  assert.ok(pollCount > 0, "the SQL retry sweep should run while Redis is active");
 });
 
 test("HTTP 4xx permanent failure sets status failed with no further retry scheduled", async () => {

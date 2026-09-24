@@ -180,7 +180,8 @@ export function generateSuggestions(baseUsername: string): string[] {
   const base = baseUsername.toLowerCase().replace(/[^a-z0-9]/g, "");
 
   // Suggestion 1: Add random number suffix
-  suggestions.push(`${base}-${Math.floor(Math.random() * 10000)}`);
+  const numericSuffix = Math.floor(Math.random() * 10000).toString();
+  suggestions.push(`${base.slice(0, 31 - numericSuffix.length)}-${numericSuffix}`);
 
   // Suggestion 2: Add "creator" prefix (if result stays within 32 char limit)
   if (!base.includes("creator") && base.length < 25) {
