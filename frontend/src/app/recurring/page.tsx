@@ -59,7 +59,9 @@ export default function RecurringPage() {
   useEffect(() => {
     async function loadRecurringSupport() {
       try {
-        const meRes = await apiFetch(`${API_BASE_URL}/auth/me`);
+        const meRes = await apiFetch(`${API_BASE_URL}/auth/me`, {
+          suppressAuthExpired: true,
+        } as RequestInit & { suppressAuthExpired?: boolean });
         if (!meRes.ok) {
           router.push("/");
           return;

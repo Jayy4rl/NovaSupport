@@ -2965,7 +2965,7 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     return profile;
   }
 
-  v1Router.post("/profiles/:username/webhooks", requireAuth, async (req, res) => {
+  v1Router.post("/profiles/:username/webhooks", requireAuth, writeLimiter, async (req, res) => {
     try {
       const parsed = webhookCreateSchema.safeParse(req.body);
       if (!parsed.success) return sendError(res, 400, "Invalid URL — must be a valid HTTPS URL");
@@ -3018,7 +3018,7 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     return res.json(webhooks);
   });
 
-  v1Router.delete("/profiles/:username/webhooks/:id", requireAuth, async (req, res) => {
+  v1Router.delete("/profiles/:username/webhooks/:id", requireAuth, writeLimiter, async (req, res) => {
     const profile = await resolveProfileOwner(req.params.username as string, req.auth, res);
     if (!profile) return;
 

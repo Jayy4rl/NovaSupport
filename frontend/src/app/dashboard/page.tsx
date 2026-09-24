@@ -100,7 +100,9 @@ export default function DashboardPage() {
   useEffect(() => {
     async function loadDashboard() {
       try {
-        const meRes = await apiFetch(`${API_BASE_URL}/auth/me`);
+        const meRes = await apiFetch(`${API_BASE_URL}/auth/me`, {
+          suppressAuthExpired: true,
+        } as RequestInit & { suppressAuthExpired?: boolean });
         if (!meRes.ok) {
           router.push("/");
           return;
