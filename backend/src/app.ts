@@ -517,63 +517,6 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     apis: ["./src/app.ts"],
   });
 
-  app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
-  app.get("/docs.json", (req, res) => {
-    const dynamicSpec = {
-      ...swaggerSpec,
-      servers: [
-        {
-          url: process.env.BACKEND_URL
-            ? process.env.BACKEND_URL.replace(/\/$/, "")
-            : `${req.protocol}://${req.get("host")}/api/v1`
-        }
-      ]
-    };
-    res.json(dynamicSpec);
-  });
-
-  // ── Stellar TOML (#514) ───────────────────────────────────────────────
-  // Must be registered before any other middleware that might intercept it.
-  // Required by Stellar wallets and federation resolvers.
-  // Spec: https://developers.stellar.org/docs/learn/encyclopedia/network-configuration/stellar-toml
-  let tomlCache: { body: string; expiresAt: number } | null = null;
-
-  app.get("/.well-known/stellar.toml", federationLimiter, async (_req, res) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Cache-Control", "public, max-age=60");
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-
-    const now = Date.now();
-    if (tomlCache && now < tomlCache.expiresAt) {
-      return res.send(tomlCache.body);
-    }
-
-    try {
-      const profiles = await prisma.profile.findMany({
-        select: { walletAddress: true },
-        take: 10_000,
-      });
-
-      const accountLines = profiles
-        .map((p) => `[[ACCOUNTS]]\naddress = "${p.walletAddress}"`)
-        .join("\n\n");
-
-      const body = [
-        `NETWORK_PASSPHRASE="${process.env.STELLAR_NETWORK === 'PUBLIC'
-          ? 'Public Global Stellar Network ; September 2015'
-          : 'Test SDF Network ; September 2015'}"`,
-        `FEDERATION_SERVER="https://api.novasupport.xyz/federation"`,
-        ``,
-        accountLines || `# no accounts yet`,
-      ].join("\n");
-
-      tomlCache = { body, expiresAt: now + 60_000 };
-      return res.send(body);
-    } catch {
-      return res.status(500).send("# Internal server error");
-    }
-  });
-
   const CHALLENGE_EXPIRY_MS = 5 * 60 * 1000; // 5 minutes
 
   const allowedOrigins = (
@@ -646,6 +589,63 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     app.use(Sentry.expressErrorHandler());
   }
   app.use(globalLimiter);
+
+  // ── Swagger docs (#1192: registered after global middleware) ──────────
+  app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+  app.get("/docs.json", (req, res) => {
+    const dynamicSpec = {
+      ...swaggerSpec,
+      servers: [
+        {
+          url: process.env.BACKEND_URL
+            ? process.env.BACKEND_URL.replace(/\/$/, "")
+            : `${req.protocol}://${req.get("host")}/api/v1`
+        }
+      ]
+    };
+    res.json(dynamicSpec);
+  });
+
+  // ── Stellar TOML (#514, #1192: registered after global middleware) ────
+  // Required by Stellar wallets and federation resolvers.
+  // Spec: https://developers.stellar.org/docs/learn/encyclopedia/network-configuration/stellar-toml
+  let tomlCache: { body: string; expiresAt: number } | null = null;
+
+  app.get("/.well-known/stellar.toml", federationLimiter, async (_req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cache-Control", "public, max-age=60");
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+
+    const now = Date.now();
+    if (tomlCache && now < tomlCache.expiresAt) {
+      return res.send(tomlCache.body);
+    }
+
+    try {
+      const profiles = await prisma.profile.findMany({
+        select: { walletAddress: true },
+        take: 10_000,
+      });
+
+      const accountLines = profiles
+        .map((p) => `[[ACCOUNTS]]\naddress = "${p.walletAddress}"`)
+        .join("\n\n");
+
+      const body = [
+        `NETWORK_PASSPHRASE="${process.env.STELLAR_NETWORK === 'PUBLIC'
+          ? 'Public Global Stellar Network ; September 2015'
+          : 'Test SDF Network ; September 2015'}"`,
+        `FEDERATION_SERVER="https://api.novasupport.xyz/federation"`,
+        ``,
+        accountLines || `# no accounts yet`,
+      ].join("\n");
+
+      tomlCache = { body, expiresAt: now + 60_000 };
+      return res.send(body);
+    } catch {
+      return res.status(500).send("# Internal server error");
+    }
+  });
 
   // ── API-Version header on every response ──────────────────────────────
   app.use((_req, res, next) => {
