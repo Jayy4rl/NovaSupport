@@ -182,8 +182,8 @@ export function generateSuggestions(baseUsername: string): string[] {
   // Suggestion 1: Add random number suffix
   suggestions.push(`${base}-${Math.floor(Math.random() * 10000)}`);
 
-  // Suggestion 2: Add "creator" prefix
-  if (!base.includes("creator")) {
+  // Suggestion 2: Add "creator" prefix (if result stays within 32 char limit)
+  if (!base.includes("creator") && base.length < 25) {
     suggestions.push(`creator-${base}`);
   }
 

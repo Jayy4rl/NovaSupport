@@ -26,11 +26,7 @@ export function createWebhookQueue(): Queue | null {
   queue = new Queue(QUEUE_NAME, {
     connection: redis,
     defaultJobOptions: {
-      attempts: MAX_DELIVERY_ATTEMPTS,
-      backoff: {
-        type: "exponential",
-        delay: 1000,
-      },
+      attempts: 1,
       removeOnComplete: { count: 100 },
       removeOnFail: { count: 50 },
     },
@@ -152,7 +148,6 @@ export function createWebhookWorker(): Worker | null {
         if (!willRetry) {
           throw new Error(`Permanent failure: ${result.error}`);
         }
-        throw new Error(`Retryable failure: ${result.error}`);
       }
     },
     {
