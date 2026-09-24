@@ -311,9 +311,23 @@ function createRateLimiters() {
     message: { error: "Too many requests, please try again later." },
   });
 
+  // CSV export scans up to 10,000 rows per request: 5 per 15 minutes per client (#1198)
+  const exportLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: () => process.env.NODE_ENV === "test",
+    message: {
+      error: "Too many export requests, please try again later.",
+      code: "RATE_LIMIT_EXCEEDED",
+    },
+  });
+
   return {
     globalLimiter,
     writeLimiter,
+    exportLimiter,
     profileCreationLimiter,
     resendLimiter,
     viewCountLimiter,
@@ -417,6 +431,7 @@ export function createApp(customLogger?: Logger) {
   const {
     globalLimiter,
     writeLimiter,
+    exportLimiter,
     profileCreationLimiter,
     resendLimiter,
     viewCountLimiter,
@@ -1118,6 +1133,19 @@ All errors return JSON with an \`error\` field and optional \`code\`:
           }
         : {};
 
+      const assetWhere = asset
+        ? {
+            acceptedAssets: {
+              some: {
+                code: asset,
+                ...(assetIssuer !== "" ? { issuer: assetIssuer } : {}),
+              },
+            },
+          }
+        : {};
+
+      const combinedWhere = { ...where, ...assetWhere };
+
       let orderBy: object = { createdAt: "desc" };
 
       if (sort === "most_supported" || sort === "most_transactions") {
@@ -1185,9 +1213,14 @@ All errors return JSON with an \`error\` field and optional \`code\`:
           return profile;
         });
 
+        // The in-memory list is capped at 1000 rows, so its length is not the
+        // true match count. Use a database count so `total` means the same
+        // thing for every sort mode (#1196).
+        const total = await prisma.profile.count({ where: combinedWhere });
+
         return res.json({
           profiles: result,
-          total: filtered.length,
+          total,
           limit,
           offset,
         });
@@ -1197,19 +1230,6 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       // When an asset filter is supplied, push it into the DB query so that
       // `total` reflects the actual matched count rather than the page-slice
       // size returned by an in-memory filter (#602).
-      const assetWhere = asset
-        ? {
-            acceptedAssets: {
-              some: {
-                code: asset,
-                ...(assetIssuer !== "" ? { issuer: assetIssuer } : {}),
-              },
-            },
-          }
-        : {};
-
-      const combinedWhere = { ...where, ...assetWhere };
-
       const [profiles, total] = await Promise.all([
         prisma.profile.findMany({
           where: combinedWhere,
@@ -2828,7 +2848,7 @@ All errors return JSON with an \`error\` field and optional \`code\`:
    *       500:
    *         description: Internal server error
    */
-  v1Router.get(["/profiles/:username/transactions/export", "/profiles/:username/transactions/csv"], requireAuth, async (req, res) => {
+  v1Router.get(["/profiles/:username/transactions/export", "/profiles/:username/transactions/csv"], requireAuth, exportLimiter, async (req, res) => {
     const username = req.params.username as string;
     const { startDate, endDate, taxYear } = req.query;
 
@@ -4452,7 +4472,8 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       });
 
       const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
-      if (reportCount >= 3 && ADMIN_EMAIL) {
+      // Alert only when the threshold is first reached, not on every later report (#1197).
+      if (reportCount === 3 && ADMIN_EMAIL) {
         try {
           const { sendEmail } = await import("./mailer.js");
           await sendEmail({
