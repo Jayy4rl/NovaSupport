@@ -19,20 +19,36 @@ export default function SettingsPage() {
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   useEffect(() => {
-    const storedUsername = localStorage.getItem("username");
-    if (!storedUsername) {
-      router.push("/");
-      return;
-    }
-    setUsername(storedUsername);
+    async function loadCurrentUser() {
+      try {
+        const meRes = await apiFetch(`${API_BASE_URL}/auth/me`);
+        if (!meRes.ok) {
+          router.push("/");
+          return;
+        }
 
-    apiFetch(`${API_BASE_URL}/profiles/${storedUsername}`)
-      .then(async (res) => {
-        if (!res.ok) return;
-        const data = await res.json();
-        setEmailVerified(Boolean(data.emailVerified));
-      })
-      .finally(() => setLoading(false));
+        const me = await meRes.json();
+        const resolvedUsername = typeof me?.username === "string" ? me.username : null;
+        if (!resolvedUsername) {
+          router.push("/");
+          return;
+        }
+
+        setUsername(resolvedUsername);
+
+        const profileRes = await apiFetch(`${API_BASE_URL}/profiles/${resolvedUsername}`);
+        if (profileRes.ok) {
+          const data = await profileRes.json();
+          setEmailVerified(Boolean(data.emailVerified));
+        }
+      } catch {
+        router.push("/");
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadCurrentUser();
   }, [router]);
 
   async function handleResendVerification() {

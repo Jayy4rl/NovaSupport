@@ -968,6 +968,39 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     }
   });
 
+  v1Router.get("/auth/me", requireAuth, async (req, res) => {
+    try {
+      const profile = await prisma.profile.findFirst({
+        where: {
+          OR: [
+            { ownerId: req.auth?.userId },
+            { walletAddress: req.auth?.walletAddress },
+          ],
+        },
+        select: {
+          username: true,
+          displayName: true,
+          walletAddress: true,
+          ownerId: true,
+        },
+      });
+
+      if (!profile) {
+        return sendError(res, 404, "Profile not found for authenticated user");
+      }
+
+      res.json({
+        username: profile.username,
+        displayName: profile.displayName,
+        walletAddress: profile.walletAddress,
+        userId: profile.ownerId,
+      });
+    } catch (e: unknown) {
+      req.log.error({ err: e }, "database error fetching current user");
+      return sendError(res, 500, "Internal server error");
+    }
+  });
+
   // ── List profiles with pagination ──────────────────────────────────────
 
   /**
@@ -3385,7 +3418,10 @@ All errors return JSON with an \`error\` field and optional \`code\`:
               if (Number(updated.currentAmount) >= Number(updated.targetAmount)) {
                 await tx.milestone.update({
                   where: { id: milestone.id },
-                  data: { status: "reached" },
+                  data: {
+                    status: "reached",
+                    reachedAt: milestone.reachedAt ?? new Date(),
+                  },
                 });
               }
             }
@@ -4249,16 +4285,24 @@ All errors return JSON with an \`error\` field and optional \`code\`:
         (parsed.data.assetCode !== undefined && parsed.data.assetCode !== milestone.assetCode) ||
         (parsed.data.assetIssuer !== undefined && parsed.data.assetIssuer !== milestone.assetIssuer);
 
-      const data: typeof parsed.data & { currentAmount?: number; status?: string } = { ...parsed.data };
+      const data: typeof parsed.data & {
+        currentAmount?: number;
+        status?: string;
+        reachedAt?: Date | null;
+      } = { ...parsed.data };
 
       if (assetChanging) {
         data.currentAmount = 0;
         data.status = "active";
+        data.reachedAt = null;
       } else if (
         parsed.data.targetAmount !== undefined &&
         Number(milestone.currentAmount) >= Number(parsed.data.targetAmount)
       ) {
         data.status = "reached";
+        data.reachedAt = milestone.reachedAt ?? new Date();
+      } else if (milestone.status === "reached" && parsed.data.title !== undefined) {
+        data.reachedAt = milestone.reachedAt;
       }
 
       const updated = await prisma.milestone.update({

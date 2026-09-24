@@ -41,7 +41,7 @@ function makePrismaMock(overrides: {
   const uniqueSupportersFindMany = mock.fn((_arg?: unknown) =>
     Promise.resolve(overrides.uniqueSupporters ?? [{ supporterAddress: "GABC" }]),
   );
-  const milestoneFindMany = mock.fn(() =>
+  const milestoneFindMany = mock.fn((_arg?: unknown) =>
     Promise.resolve(overrides.milestones ?? []),
   );
   const txGroupBy = mock.fn(() =>
@@ -173,6 +173,26 @@ test("sendWeeklyDigests skips profiles with no transactions this week", async ()
 
   // Should not throw even with no transactions
   await assert.doesNotReject(() => sendWeeklyDigests(mockPrisma as any));
+});
+
+test("sendWeeklyDigests filters milestone reach events by reachedAt instead of updatedAt", async () => {
+  const mockPrisma = makePrismaMock({
+    profiles: [makeProfile()],
+    transactions: [{ amount: 5n, assetCode: "XLM", createdAt: new Date() }],
+    milestones: [],
+    assetGroups: [makeAssetGroup("XLM", "5")],
+  });
+
+  await sendWeeklyDigests(mockPrisma as any);
+
+  const milestoneCall = mockPrisma.milestone.findMany.mock.calls[0]?.arguments[0] as {
+    where: { status: string; reachedAt?: { gte: Date }; updatedAt?: unknown };
+  } | undefined;
+  assert.ok(milestoneCall);
+  assert.deepEqual(milestoneCall.where.status, "reached");
+  assert.ok(milestoneCall.where.reachedAt);
+  assert.ok(milestoneCall.where.reachedAt.gte instanceof Date);
+  assert.equal("updatedAt" in milestoneCall.where, false);
 });
 
 // ── issue #984: XSS via assetCode in digest HTML ──────────────────────────────
