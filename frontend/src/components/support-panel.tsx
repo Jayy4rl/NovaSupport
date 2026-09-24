@@ -39,8 +39,9 @@ const FEE_IN_XLM = Number(BASE_FEE) / 10_000_000;
 
 /**
  * True when a Horizon balance line matches one of the creator's accepted
- * assets. An accepted asset without an issuer matches any issuer for that code
- * (native XLM never has an issuer).
+ * assets. Native XLM never has an issuer, so an accepted XLM without an
+ * issuer matches any native balance. For non-native assets an explicit
+ * issuer is required — a missing issuer no longer acts as a wildcard.
  */
 function isAcceptedBalance(balance: any, acceptedAssets: Asset[]): boolean {
   return acceptedAssets.some((asset) => {
@@ -49,7 +50,8 @@ function isAcceptedBalance(balance: any, acceptedAssets: Asset[]): boolean {
     }
     return (
       asset.code === balance.asset_code &&
-      (!asset.issuer || asset.issuer === balance.asset_issuer)
+      !!asset.issuer &&
+      asset.issuer === balance.asset_issuer
     );
   });
 }

@@ -37,6 +37,12 @@ const CONSTRAINTS = [
   { field: "GitHub", rule: "Optional · max 39 chars · hyphens allowed" },
 ];
 
+// Well-known Stellar mainnet issuers for preset assets offered in onboarding.
+// XLM is native and never has an issuer.
+const KNOWN_ISSUERS: Record<string, string> = {
+  USDC: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3THOJ2E37CEGOEZWDSP",
+};
+
 export default function CreatePage() {
   const router = useRouter();
   const { toast, showToast, dismiss } = useToast();
@@ -153,6 +159,11 @@ export default function CreatePage() {
       }
       if (assets.length === 0) {
         setError("Please select at least one accepted asset.");
+        return;
+      }
+      const missingIssuer = assets.find((a) => a.code !== "XLM" && !a.issuer.trim());
+      if (missingIssuer) {
+        setError(`Issuer required for ${missingIssuer.code} — please enter the Stellar issuer address.`);
         return;
       }
     }
@@ -435,7 +446,7 @@ export default function CreatePage() {
                           setAssets(
                             isSelected
                               ? assets.filter((a) => a.code !== asset)
-                              : [...assets, { code: asset, issuer: "" }]
+                              : [...assets, { code: asset, issuer: KNOWN_ISSUERS[asset] ?? "" }]
                           );
                           setForm((prev) => ({
                             ...prev,
@@ -454,6 +465,45 @@ export default function CreatePage() {
                       </button>
                     ))}
                   </div>
+                  {assets.some((a) => a.code !== "XLM") && (
+                    <div className="space-y-3 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                      <p className="text-[10px] uppercase tracking-[0.25em] text-steel">
+                        Asset issuers <span className="text-mint">*</span> — required for non-XLM assets
+                      </p>
+                      {assets
+                        .filter((a) => a.code !== "XLM")
+                        .map((asset) => (
+                          <div key={asset.code} className="flex flex-col gap-1.5">
+                            <label className="text-xs font-medium text-steel">
+                              {asset.code} issuer
+                            </label>
+                            <input
+                              type="text"
+                              placeholder={
+                                KNOWN_ISSUERS[asset.code] ? `Default: ${KNOWN_ISSUERS[asset.code].slice(0, 8)}…` : "G… Stellar issuer address"
+                              }
+                              value={asset.issuer}
+                              onChange={(e) => {
+                                const val = e.target.value.trim();
+                                setAssets((prev) =>
+                                  prev.map((p) => (p.code === asset.code ? { ...p, issuer: val } : p))
+                                );
+                              }}
+                              className={`w-full rounded-xl border bg-white/5 px-3 py-2 font-mono text-xs text-white placeholder:text-steel/40 focus:outline-none focus:ring-1 transition ${
+                                asset.issuer.trim() === ""
+                                  ? "border-amber-500/40 focus:border-amber-500/50 focus:ring-amber-500/20"
+                                  : "border-white/10 focus:border-mint/50 focus:ring-mint/20"
+                              }`}
+                            />
+                            {asset.issuer.trim() === "" && (
+                              <p className="text-[10px] text-amber-400">
+                                Issuer required — without it, this asset will not be accepted for payments.
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
