@@ -36,7 +36,7 @@ export async function sendSupportReceivedEmail({
 
   const html = `
     <h2>You've received support!</h2>
-    <p>A supporter (${truncatedAddress}) has sent you <strong>${amount} ${assetCode}</strong>.</p>
+    <p>A supporter (${escapeHtml(truncatedAddress)}) has sent you <strong>${escapeHtml(amount)} ${escapeHtml(assetCode)}</strong>.</p>
     ${message ? `<p><strong>Message:</strong> "${escapeHtml(message)}"</p>` : ""}
     <p><a href="${stellarExpertLink}">View transaction on Stellar Expert</a></p>
     <br/>
