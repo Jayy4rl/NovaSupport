@@ -169,6 +169,43 @@ describe("Additional Component Snapshots", () => {
     expect(container).toMatchSnapshot();
   });
 
+  it("ActivityFeed matches snapshot (with loaded data)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            transactions: [
+              {
+                id: "tx1",
+                amount: "100.0000000",
+                assetCode: "XLM",
+                status: "SUCCESS",
+                createdAt: "2024-01-15T10:30:00Z",
+                supporterAddress: "GCZJM35NKGVK47BB4SPBDV25477PZYIYPVVG453LPYFNXLS3FGHDXOCM",
+              },
+            ],
+          }),
+        } as unknown as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ milestones: [] }),
+        } as unknown as Response),
+    );
+
+    const { container } = renderWithQueryClient(<ActivityFeed username="johndoe" limit={5} />);
+
+    await waitFor(() => {
+      expect(container.querySelector("table")).toBeInTheDocument();
+    });
+
+    expect(container).toMatchSnapshot();
+
+    // Restore the original never-resolving mock for subsequent tests
+    vi.stubGlobal("fetch", vi.fn().mockReturnValue(new Promise(() => {})));
+  });
+
   it("NotificationPreferences matches snapshot (no auth token)", () => {
     const { container } = render(<NotificationPreferences username="johndoe" />);
     expect(container).toMatchSnapshot();
