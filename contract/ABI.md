@@ -112,7 +112,6 @@ Behavior:
 - Increments the global `SupportCount`.
 - Increments `RecipientCount` for this recipient.
 - Adds `amount` to `RecipientTotal` for this recipient and asset pair.
-- Adds `amount` to `TotalByAsset` for this recipient and asset pair.
 - Emits a `support` event with the full payload including a timestamp.
 - Returns the new global support count.
 
@@ -154,7 +153,7 @@ Behavior:
 - Rejects calls if `amount` exceeds the recipient's recorded balance for this asset.
 - Checks the contract's actual token balance; rejects if insufficient (`InsufficientContractBalance`).
 - Transfers `amount` tokens from the contract to `recipient`.
-- Deducts `amount` from `TotalByAsset` and `RecipientTotal`.
+- Deducts `amount` from `RecipientTotal`.
 - Emits a `withdraw` event with the caller, asset, and amount.
 
 Errors:
@@ -286,7 +285,6 @@ Event fields (tuple):
 | `SupportCount` | `u32` | Global count of successful `support()` calls stored in persistent storage. |
 | `RecipientCount(Address)` | `u32` | Per-recipient count of support actions received. |
 | `RecipientTotal(Address, Address)` | `i128` | Per-recipient, per-asset total amount received (reduced by withdrawals). First address is the recipient, second is the asset token contract. |
-| `TotalByAsset(Address, Address)` | `i128` | Per-recipient, per-asset total amount received (reduced by withdrawals). First address is the recipient, second is the asset token contract. |
 | `Admin` | `Address` | Contract administrator address. Set during `initialize()`. |
 | `Paused` | `bool` | Whether the contract is paused. Toggled by `pause()` / `unpause()`. |
 

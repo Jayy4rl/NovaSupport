@@ -4,6 +4,7 @@ import { BlockList, isIP } from "node:net";
 import { logger } from "../logger.js";
 
 const PRIVATE_IP_RANGES = new BlockList();
+PRIVATE_IP_RANGES.addSubnet("0.0.0.0", 8, "ipv4");
 PRIVATE_IP_RANGES.addSubnet("127.0.0.0", 8, "ipv4");
 PRIVATE_IP_RANGES.addSubnet("10.0.0.0", 8, "ipv4");
 PRIVATE_IP_RANGES.addSubnet("172.16.0.0", 12, "ipv4");
