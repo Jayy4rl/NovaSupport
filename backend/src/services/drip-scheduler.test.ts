@@ -1,6 +1,8 @@
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { processDueRecurringSupports } from "./drip-scheduler.js";
+import { prisma } from "../db.js";
+import { seedUser, seedProfile, seedRecurringSupport, cleanupTestData } from "../test-harness.js";
 
 function makeSupport(overrides: Record<string, unknown> = {}) {
   const now = new Date();
@@ -257,4 +259,56 @@ test("processDueRecurringSupports queries again when a full batch of 100 is retu
 
   assert.equal(recurringSupportFindMany.mock.callCount(), 2);
   assert.equal($executeRaw.mock.callCount(), 100);
+});
+
+// ── Integration tests (real Postgres database) ──────────────────────────────
+
+test("processDueRecurringSupports integration: creates execution for due recurring support", async () => {
+  const userId = await seedUser();
+  const profileId = await seedProfile(userId);
+  const supporterId = await seedUser();
+  const now = new Date();
+  const dueDate = new Date(now.getTime() - 60000);
+
+  const dripId = await seedRecurringSupport(profileId, supporterId, {
+    frequency: "weekly",
+    nextRunAt: dueDate,
+    status: "active",
+  });
+
+  await processDueRecurringSupports(prisma);
+
+  const execution = await prisma.recurringSupportExecution.findFirst({
+    where: { recurringSupportId: dripId },
+  });
+
+  assert.ok(execution, "Should create an execution for due recurring support");
+  assert.equal(execution.status, "pending");
+
+  await cleanupTestData([profileId], [userId, supporterId]);
+});
+
+test("processDueRecurringSupports integration: advances nextRunAt correctly", async () => {
+  const userId = await seedUser();
+  const profileId = await seedProfile(userId);
+  const supporterId = await seedUser();
+  const nextRunAt = new Date(Date.UTC(2024, 0, 15, 12, 0, 0));
+
+  await seedRecurringSupport(profileId, supporterId, {
+    frequency: "weekly",
+    nextRunAt,
+    status: "active",
+  });
+
+  await processDueRecurringSupports(prisma, nextRunAt);
+
+  const updated = await prisma.recurringSupport.findFirst({
+    where: { profileId },
+  });
+
+  assert.ok(updated, "Recurring support should exist");
+  const expectedNext = new Date(nextRunAt.getTime() + 7 * 24 * 60 * 60 * 1000);
+  assert.equal(updated.nextRunAt.getTime(), expectedNext.getTime(), "nextRunAt should advance by 1 week");
+
+  await cleanupTestData([profileId], [userId, supporterId]);
 });
