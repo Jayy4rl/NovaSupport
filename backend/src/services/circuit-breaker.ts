@@ -70,35 +70,40 @@ export class CircuitBreaker {
       });
 
       try {
-        const result = await fn();
+        let result!: T;
+        try {
+          result = await fn();
+        } catch (error) {
+          await this.onFailure();
+          throw error;
+        }
         await this.onSuccess();
         return result;
-      } catch (error) {
-        await this.onFailure();
-        throw error;
       } finally {
         this.halfOpenCanary = null;
         resolvCanary();
       }
     }
 
+    let result!: T;
     try {
-      const result = await fn();
-      await this.onSuccess();
-      return result;
+      result = await fn();
     } catch (error) {
       await this.onFailure();
       throw error;
     }
+    await this.onSuccess();
+    return result;
   }
 
   private async onSuccess() {
+    const unchanged = this.failureCount === 0 && this.state === "CLOSED";
     this.failureCount = 0;
     if (this.state === "HALF_OPEN") {
       await this.setState("CLOSED");
       Metrics.circuitBreakerState("CLOSED");
       logger.info("Circuit breaker state: CLOSED");
-    } else {
+    } else if (!unchanged) {
       await this.persist();
     }
   }
@@ -107,14 +112,22 @@ export class CircuitBreaker {
     this.failureCount++;
     if (this.state === "HALF_OPEN" || this.failureCount >= this.failureThreshold) {
       this.nextAttempt = Date.now() + this.resetTimeout;
-      await this.setState("OPEN");
+      try {
+        await this.setState("OPEN");
+      } catch (err) {
+        logger.error({ err }, "Failed to persist circuit breaker OPEN state");
+      }
       Metrics.circuitBreakerState("OPEN");
       logger.warn(
         { failureCount: this.failureCount, nextAttempt: new Date(this.nextAttempt).toISOString() },
         "Circuit breaker state: OPEN"
       );
     } else {
-      await this.persist();
+      try {
+        await this.persist();
+      } catch (err) {
+        logger.error({ err }, "Failed to persist circuit breaker state");
+      }
     }
   }
 
