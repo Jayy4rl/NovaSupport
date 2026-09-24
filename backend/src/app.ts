@@ -370,7 +370,14 @@ function escapeCsvCell(value: unknown): string {
   }
 
   const text = value instanceof Date ? value.toISOString() : String(value);
-  return `"${text.replace(/"/g, '""')}"`;
+  const escaped = text.replace(/"/g, '""');
+
+  // Escape formula-starting characters: =, +, -, @, tab, CR
+  if (/^[=+\-@\t\r]/.test(escaped)) {
+    return `"'${escaped}"`;
+  }
+
+  return `"${escaped}"`;
 }
 
 function toCsv(rows: unknown[][]): string {
@@ -4069,28 +4076,47 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     }
 
     try {
-      const failed = await prisma.webhookDelivery.findMany({
-        where: { status: "failed" },
-        select: { id: true },
-      });
+      const PAGE_SIZE = 100;
+      let totalRequeued = 0;
+      let hasMore = true;
 
-      const result = await prisma.webhookDelivery.updateMany({
-        where: { id: { in: failed.map((d) => d.id) } },
-        data: {
-          status: "pending",
-          attemptCount: 0,
-          nextRetryAt: new Date(),
-        },
-      });
-
-      for (const delivery of failed) {
-        enqueueWebhookDelivery(delivery.id).catch((err) => {
-          req.log.warn({ deliveryId: delivery.id, err }, "Failed to enqueue requeued webhook");
+      while (hasMore) {
+        const failed = await prisma.webhookDelivery.findMany({
+          where: { status: "failed" },
+          select: { id: true },
+          take: PAGE_SIZE,
         });
+
+        if (failed.length === 0) {
+          hasMore = false;
+          break;
+        }
+
+        const result = await prisma.webhookDelivery.updateMany({
+          where: { id: { in: failed.map((d) => d.id) } },
+          data: {
+            status: "pending",
+            attemptCount: 0,
+            nextRetryAt: new Date(),
+          },
+        });
+
+        totalRequeued += result.count;
+
+        const promises = failed.map((delivery) =>
+          enqueueWebhookDelivery(delivery.id).catch((err) => {
+            req.log.warn({ deliveryId: delivery.id, err }, "Failed to enqueue requeued webhook");
+          }),
+        );
+        await Promise.all(promises);
+
+        if (failed.length < PAGE_SIZE) {
+          hasMore = false;
+        }
       }
 
-      req.log.info({ count: result.count }, "requeued failed webhooks");
-      return res.json({ count: result.count });
+      req.log.info({ count: totalRequeued }, "requeued failed webhooks");
+      return res.json({ count: totalRequeued });
     } catch (e: unknown) {
       req.log.error({ err: e }, "database error requeuing webhooks");
       return sendError(res, 500, "Internal server error");
