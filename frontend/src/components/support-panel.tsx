@@ -57,6 +57,13 @@ function truncateMemoToStellarLimit(input: string): string {
   // Walk back until the slice is valid UTF-8 (no broken multibyte tail).
   while (bytes.length > 0) {
     const decoded = decoder.decode(bytes);
+    // Check if the decoded string contains the replacement character (U+FFFD)
+    // that wasn't in the original input — if so, we've cut in the middle of
+    // a multibyte sequence and must back off further.
+    if (decoded.includes("�") && !input.includes("�")) {
+      bytes = bytes.slice(0, bytes.length - 1);
+      continue;
+    }
     if (encoder.encode(decoded).length === bytes.length) return decoded;
     bytes = bytes.slice(0, bytes.length - 1);
   }
