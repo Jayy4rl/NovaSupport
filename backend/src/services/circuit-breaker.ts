@@ -47,9 +47,23 @@ export class CircuitBreaker {
 
     if (this.state === "OPEN") {
       if (Date.now() >= this.nextAttempt) {
-        await this.setState("HALF_OPEN");
-        Metrics.circuitBreakerState("HALF_OPEN");
-        logger.info("Circuit breaker state: HALF_OPEN");
+        // Re-read shared state from storage before transitioning to HALF_OPEN
+        // so that in a multi-replica deployment only one replica actually sends
+        // the canary request (#1185).
+        await this.refreshFromStorage();
+        if (this.state === "OPEN") {
+          if (Date.now() >= this.nextAttempt) {
+            await this.setState("HALF_OPEN");
+            Metrics.circuitBreakerState("HALF_OPEN");
+            logger.info("Circuit breaker state: HALF_OPEN");
+          } else {
+            throw new Error("Circuit breaker is OPEN");
+          }
+        }
+        // If refreshFromStorage moved us to HALF_OPEN or CLOSED, fall through.
+        if (this.state !== "HALF_OPEN" && this.state !== "CLOSED") {
+          throw new Error("Circuit breaker is OPEN");
+        }
       } else {
         throw new Error("Circuit breaker is OPEN");
       }
@@ -183,5 +197,26 @@ export class CircuitBreaker {
       failureCount: this.failureCount,
       nextAttempt: this.nextAttempt,
     });
+  }
+
+  /**
+   * Re-read shared state from storage so that in a multi-replica deployment
+   * only one replica transitions OPEN → HALF_OPEN and sends the canary
+   * request (#1185). If another replica already moved the breaker forward,
+   * this replica picks up the new state and skips the duplicate canary.
+   */
+  private async refreshFromStorage(): Promise<void> {
+    if (!this.storage) return;
+    try {
+      const snapshot = await this.storage.load();
+      if (snapshot) {
+        this.state = snapshot.state;
+        this.failureCount = snapshot.failureCount;
+        this.nextAttempt = snapshot.nextAttempt;
+        Metrics.circuitBreakerState(this.state);
+      }
+    } catch (err) {
+      logger.error({ err }, "Failed to refresh circuit breaker state from storage");
+    }
   }
 }

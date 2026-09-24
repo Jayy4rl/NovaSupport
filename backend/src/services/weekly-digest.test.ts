@@ -66,29 +66,34 @@ function makePrismaMock(overrides: {
 // ── issue #656: cross-asset sum removed ──────────────────────────────────────
 
 test("sendWeeklyDigests email does not contain a cross-asset totalReceived figure", async () => {
-  const capturedEmails: string[] = [];
+  const capturedEmails: Array<{ to: string; subject: string; html?: string; text?: string }> = [];
 
-  // Patch sendEmail dynamically via module mock isn't available in node:test.
-  // We verify the fix indirectly by checking the assetBreakdown format is present
-  // and that no single numeric total appears by inspecting assetGroups directly.
+  const mockSendEmail = mock.fn(async (opts: { to: string; subject: string; html?: string; text?: string }) => {
+    capturedEmails.push(opts);
+  });
+
   const xlmGroup = makeAssetGroup("XLM", "5");
   const usdcGroup = makeAssetGroup("USDC", "5");
 
+  const mockPrisma = makePrismaMock({
+    assetGroups: [xlmGroup, usdcGroup],
+  });
+
+  await sendWeeklyDigests(mockPrisma as any, mockSendEmail as any);
+
+  // The function was called — an email was sent
+  assert.ok(capturedEmails.length > 0, "sendEmail should have been called");
+
+  const html = capturedEmails[0].html ?? "";
+
   // The old (wrong) behaviour would produce "10.0000000" — sum of 5+5.
-  // The new behaviour shows "5.0000000 XLM, 5.0000000 USDC".
+  // The new behaviour shows per-asset breakdown only.
   const wrongTotal = (5 + 5).toFixed(7); // "10.0000000"
-  const correctBreakdown = `${(5).toFixed(7)} XLM, ${(5).toFixed(7)} USDC`;
+  assert.ok(!html.includes(wrongTotal), "cross-asset total must not appear in email HTML");
 
-  // Verify that the assetBreakdown string is correct and the cross-sum isn't
-  const assetBreakdown = [xlmGroup, usdcGroup]
-    .map((g) => `${g._sum.amount.toFixed(7)} ${g.assetCode}`)
-    .join(", ");
-
-  assert.equal(assetBreakdown, correctBreakdown);
-  assert.notEqual(assetBreakdown, wrongTotal);
-
-  // And confirm 10.0000000 does NOT appear in the breakdown
-  assert.ok(!assetBreakdown.includes(wrongTotal), "cross-asset total must not appear in assetBreakdown");
+  // Per-asset amounts should still be present
+  assert.ok(html.includes("5.0000000 XLM"), "XLM amount should appear in email");
+  assert.ok(html.includes("5.0000000 USDC"), "USDC amount should appear in email");
 });
 
 // ── issue #657: profile batch pagination ─────────────────────────────────────

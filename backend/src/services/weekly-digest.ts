@@ -1,11 +1,14 @@
 import { prisma } from "../db.js";
-import { sendEmail } from "../mailer.js";
+import { sendEmail as defaultSendEmail } from "../mailer.js";
 import { logger } from "../logger.js";
 import { escapeHtml } from "./email.js";
 
 const PROFILE_BATCH_SIZE = 100;
 
-export async function sendWeeklyDigests(prismaClient = prisma) {
+export async function sendWeeklyDigests(
+  prismaClient = prisma,
+  sendEmailFn: typeof defaultSendEmail = defaultSendEmail,
+) {
   let cursor: string | undefined;
   let totalProfilesEmailed = 0;
   let totalErrors = 0;
@@ -129,7 +132,7 @@ export async function sendWeeklyDigests(prismaClient = prisma) {
         </p>
       `;
 
-        await sendEmail({
+        await sendEmailFn({
           to: profile.email!,
           subject: "Your NovaSupport weekly recap",
           text,

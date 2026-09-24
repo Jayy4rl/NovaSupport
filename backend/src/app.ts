@@ -2571,7 +2571,7 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     amount: z.string()
       .regex(/^\d+(\.\d{1,7})?$/, "amount must be a positive decimal with up to 7 decimal places")
       .refine(v => parseFloat(v) > 0, "amount must be greater than zero"),
-    assetCode: z.string().min(1),
+    assetCode: z.string().min(1).max(12),
     assetIssuer: z.string().optional().nullable(),
     status: z.enum(["pending", "SUCCESS", "failed"]).default("pending"),
     message: z.string().max(280).optional().nullable(),
