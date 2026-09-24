@@ -66,6 +66,21 @@ declare global {
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const MAX_FILE_SIZE = 2_097_152;
 
+function getFileSignature(buffer: Buffer): string | null {
+  if (!buffer || buffer.length < 4) return null;
+
+  const hex = buffer.toString("hex", 0, Math.min(12, buffer.length));
+
+  if (hex.startsWith("ffd8ff")) return "image/jpeg";
+  if (hex.startsWith("89504e47")) return "image/png";
+  if (hex.startsWith("52494646") && hex.length >= 24) {
+    const chunk = buffer.toString("ascii", 8, 12);
+    if (chunk === "WEBP") return "image/webp";
+  }
+
+  return null;
+}
+
 const horizonUrl =
   process.env.HORIZON_URL ?? "https://horizon-testnet.stellar.org";
 const stellarServer = new Horizon.Server(horizonUrl);
@@ -127,11 +142,10 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_FILE_SIZE },
   fileFilter: (_req, file, cb) => {
-    if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new multer.MulterError("LIMIT_UNEXPECTED_FILE", file.fieldname));
+    if (!ALLOWED_MIME_TYPES.has(file.mimetype)) {
+      return cb(new multer.MulterError("LIMIT_UNEXPECTED_FILE", file.fieldname));
     }
+    cb(null, true);
   },
 });
 
@@ -1373,6 +1387,14 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       );
     }
 
+    if (q.length > 100) {
+      return sendError(
+        res,
+        400,
+        "Query parameter 'q' must not exceed 100 characters",
+      );
+    }
+
     try {
       const pagination = profileSearchPaginationSchema.safeParse(req.query);
       if (!pagination.success) {
@@ -1536,7 +1558,7 @@ All errors return JSON with an \`error\` field and optional \`code\`:
    */
   // #463 — view count: increment once per IP per hour via viewCountLimiter
 //   app.get("/profiles/:username", async (req, res) => {
-  v1Router.get("/profiles/:username", optionalAuth, async (req, res) => {
+  v1Router.get("/profiles/:username", optionalAuth, viewCountLimiter, async (req, res) => {
     try {
       const profile = await prisma.profile.findUnique({
         where: { username: req.params.username as string },
@@ -1587,9 +1609,6 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       return sendError(res, 500, "Internal server error");
     }
   });
-
-  // Apply per-IP view count limiter (rate-limits the increment, not the read)
-  app.use("/profiles/:username", viewCountLimiter);
 
 //   app.get("/profiles/:username/stats", async (req, res) => {
   v1Router.get("/profiles/:username/stats", async (req, res) => {
@@ -3924,6 +3943,11 @@ All errors return JSON with an \`error\` field and optional \`code\`:
         return sendError(res, 400, "No file attached — include an 'avatar' field in the multipart body");
       }
 
+      const detectedMimeType = getFileSignature(req.file.buffer);
+      if (!detectedMimeType || !ALLOWED_MIME_TYPES.has(detectedMimeType)) {
+        return sendError(res, 400, "File type validation failed — the uploaded file is not a valid image (JPEG, PNG, or WebP)");
+      }
+
       // Delete old avatar to prevent orphaned files
       const listResult = await supabaseClient.storage.from(bucket).list(`avatars/${username}`);
       if (listResult.data) {
@@ -4671,6 +4695,12 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     const user = await prisma.user.findFirst({ where: { email: req.auth!.walletAddress } });
     if (!user) return sendError(res, 401, "User not found");
 
+    const pagination = paginationSchema.safeParse(req.query);
+    if (!pagination.success) {
+      return sendError(res, 400, "Invalid pagination parameters", "INVALID_PAGINATION");
+    }
+    const { limit, offset } = pagination.data;
+
     const { profileId } = req.query as { profileId?: string };
 
     if (profileId) {
@@ -4683,6 +4713,8 @@ All errors return JSON with an \`error\` field and optional \`code\`:
         where: { profileId, status: { not: "cancelled" } },
         include: { supporter: { select: { email: true } } },
         orderBy: { createdAt: "desc" },
+        take: limit,
+        skip: offset,
       });
 
       return res.json(subscriptions.map((s) => ({
@@ -4704,6 +4736,8 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       where: { supporterId: user.id, status: { not: "cancelled" } },
       include: { profile: { select: { username: true, displayName: true, avatarUrl: true } } },
       orderBy: { createdAt: "desc" },
+      take: limit,
+      skip: offset,
     });
 
     return res.json(subscriptions.map((s) => ({
