@@ -234,6 +234,11 @@ export class EventIndexer {
       take: 100,
     });
 
+    const trueBacklog = await this.prisma.supportTransaction.count({
+      where: { profileId: "__orphan__" },
+    });
+    Metrics.orphanCount(trueBacklog);
+
     if (orphans.length === 0) return 0;
 
     // Collect unique recipient addresses to look up in one query
@@ -260,12 +265,6 @@ export class EventIndexer {
       logger.info({ resolved }, "resolved orphaned transactions to profiles");
     }
 
-    // Use the true backlog count (unbounded) for the metric so alerting
-    // reflects the real severity, not just the processing page size.
-    const trueBacklog = await this.prisma.supportTransaction.count({
-      where: { profileId: "__orphan__" },
-    });
-    Metrics.orphanCount(trueBacklog);
     return resolved;
   }
 

@@ -57,22 +57,33 @@ export default function RecurringPage() {
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   useEffect(() => {
-    const username = localStorage.getItem("username");
-    if (!username) {
-      router.push("/");
-      return;
-    }
+    async function loadRecurringSupport() {
+      try {
+        const meRes = await apiFetch(`${API_BASE_URL}/auth/me`);
+        if (!meRes.ok) {
+          router.push("/");
+          return;
+        }
 
-    apiFetch(`${API_BASE_URL}/v1/recurring-support`)
-      .then(async (res) => {
+        const me = await meRes.json();
+        const username = typeof me?.username === "string" ? me.username : null;
+        if (!username) {
+          router.push("/");
+          return;
+        }
+
+        const res = await apiFetch(`${API_BASE_URL}/v1/recurring-support`);
         if (!res.ok) throw new Error("Failed to load recurring support subscriptions");
         const data = await res.json();
         setSubscriptions(data);
-      })
-      .catch((err: unknown) => {
+      } catch (err: unknown) {
         setError(err instanceof Error ? err.message : "Something went wrong");
-      })
-      .finally(() => setLoading(false));
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadRecurringSupport();
   }, [router]);
 
   async function handleCancel(id: string) {

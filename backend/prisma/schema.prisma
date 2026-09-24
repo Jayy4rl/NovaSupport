@@ -104,20 +104,22 @@ model SupportTransaction {
 }
 
 model Milestone {
-  id            String   @id @default(cuid())
+  id            String    @id @default(cuid())
   title         String
   description   String?
-  targetAmount  Decimal  @db.Decimal(18, 7)
-  currentAmount Decimal  @db.Decimal(18, 7) @default(0)
-  assetCode     String   @default("XLM")
+  targetAmount  Decimal   @db.Decimal(18, 7)
+  currentAmount Decimal   @db.Decimal(18, 7) @default(0)
+  assetCode     String    @default("XLM")
   assetIssuer   String?
-  status        String   @default("active")
+  status        String    @default("active")
+  reachedAt     DateTime?
   profileId     String
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  profile       Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  profile       Profile   @relation(fields: [profileId], references: [id], onDelete: Cascade)
 
   @@index([profileId])
+  @@index([profileId, status, reachedAt(sort: Desc)])
 }
 
 model Badge {

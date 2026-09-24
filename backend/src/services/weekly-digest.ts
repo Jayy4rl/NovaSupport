@@ -58,7 +58,7 @@ export async function sendWeeklyDigests(prismaClient = prisma) {
             where: {
               profileId: profile.id,
               status: "reached",
-              updatedAt: { gte: sevenDaysAgo },
+              reachedAt: { gte: sevenDaysAgo },
             },
           }),
           prismaClient.supportTransaction.groupBy({

@@ -109,7 +109,12 @@ import { startWebhookProcessor } from "./services/webhook-processor.js";
 import { EventIndexer } from "./services/event-indexer.js";
 import { createSorobanRpcClient } from "./services/soroban-rpc-client.js";
 import { startWeeklyDigestScheduler, stopWeeklyDigestScheduler } from "./services/weekly-digest.js";
-import { startIpRetentionPurgeScheduler, stopIpRetentionPurgeScheduler } from "./services/ip-retention-purge.js";
+import {
+  startIpRetentionPurgeScheduler,
+  stopIpRetentionPurgeScheduler,
+  startRevokedTokenPurgeScheduler,
+  stopRevokedTokenPurgeScheduler,
+} from "./services/ip-retention-purge.js";
 import { prisma } from "./db.js";
 import { connectRedis, disconnectRedis } from "./services/redis.js";
 
@@ -163,6 +168,9 @@ const server = app.listen(port, () => {
   // Start the reporter IP retention purge scheduler
   startIpRetentionPurgeScheduler();
 
+  // Start the revoked token purge scheduler
+  startRevokedTokenPurgeScheduler();
+
   // Start the webhook delivery processor
   webhookProcessor = startWebhookProcessor();
 
@@ -192,6 +200,7 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
       eventIndexer?.stop(),
       Promise.resolve().then(() => stopWeeklyDigestScheduler()),
       Promise.resolve().then(() => stopIpRetentionPurgeScheduler()),
+      Promise.resolve().then(() => stopRevokedTokenPurgeScheduler()),
     ]);
 
     await new Promise<void>((resolve, reject) => {

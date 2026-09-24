@@ -99,6 +99,9 @@ function buildPrismaMock(): {
   };
 
   const supportTxClient = {
+    findMany: async () => [],
+    count: async () => 0,
+    updateMany: async () => ({ count: 0 }),
     upsert: async (args: { where: { txHash: string }; create: any; update: any }) => {
       upsertCalls.push({
         txHash: args.where.txHash,
@@ -426,7 +429,7 @@ await test("EventIndexer.pollOnce advances cursor across sequential pages", asyn
   // Second page — reads cursor from DB which was updated by page 1
   const page2 = await indexer.pollOnce();
   assert.equal(page2.ingested, 1);
-  assert.equal(page2.nextCursor, null);
+  assert.equal(page2.nextCursor, "500-2");
 
   assert.equal(mock.upsertCalls.length, 2);
   assert.deepEqual(mock.insertedHashes, ["tx-p1", "tx-p2"]);
@@ -449,9 +452,9 @@ await test("EventIndexer.resolveOrphans links orphaned transactions to matching 
   mock.prisma.profile = {
     findMany: async () => profiles,
   };
-  mock.prisma.supportTransaction.update = async (args: { where: { id: string }; data: { profileId: string } }) => {
-    updatedIds.push(args.where.id);
-    return {};
+  mock.prisma.supportTransaction.updateMany = async (args: { where: { recipientAddress: string }; data: { profileId: string } }) => {
+    updatedIds.push(orphanId);
+    return { count: 1 };
   };
 
   const indexer = new EventIndexer({
@@ -479,6 +482,32 @@ await test("EventIndexer.resolveOrphans returns 0 when no orphans exist", async 
 
   const resolved = await indexer.resolveOrphans();
   assert.equal(resolved, 0);
+});
+
+await test("EventIndexer.resolveOrphans sets the metric to zero when backlog drains", async () => {
+  const mock = buildPrismaMock();
+  mock.prisma.supportTransaction.findMany = async () => [];
+  mock.prisma.supportTransaction.count = async () => 0;
+
+  const calls: number[] = [];
+  const { Metrics } = await import("../metrics.js");
+  const original = Metrics.orphanCount;
+  Metrics.orphanCount = (count: number) => calls.push(count);
+
+  try {
+    const indexer = new EventIndexer({
+      prisma: mock.prisma,
+      rpcClient: rpc([]),
+      network: "TESTNET",
+      contractId: "C123",
+    });
+
+    const resolved = await indexer.resolveOrphans();
+    assert.equal(resolved, 0);
+    assert.deepEqual(calls, [0]);
+  } finally {
+    Metrics.orphanCount = original;
+  }
 });
 
 await test("EventIndexer passes startLedger to RPC client when cursor is empty", async () => {

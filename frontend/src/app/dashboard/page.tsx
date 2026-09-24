@@ -100,20 +100,26 @@ export default function DashboardPage() {
   useEffect(() => {
     async function loadDashboard() {
       try {
-        // Get username from localStorage or session
-        const storedUsername = localStorage.getItem("username");
-        if (!storedUsername) {
+        const meRes = await apiFetch(`${API_BASE_URL}/auth/me`);
+        if (!meRes.ok) {
           router.push("/");
           return;
         }
 
-        setUsername(storedUsername);
+        const me = await meRes.json();
+        const resolvedUsername = typeof me?.username === "string" ? me.username : null;
+        if (!resolvedUsername) {
+          router.push("/");
+          return;
+        }
+
+        setUsername(resolvedUsername);
 
         const [statsRes, milestonesRes, webhooksRes, profileRes] = await Promise.all([
-          apiFetch(`${API_BASE_URL}/profiles/${storedUsername}/stats`),
-          apiFetch(`${API_BASE_URL}/profiles/${storedUsername}/milestones`),
-          apiFetch(`${API_BASE_URL}/profiles/${storedUsername}/webhooks`),
-          apiFetch(`${API_BASE_URL}/profiles/${storedUsername}`),
+          apiFetch(`${API_BASE_URL}/profiles/${resolvedUsername}/stats`),
+          apiFetch(`${API_BASE_URL}/profiles/${resolvedUsername}/milestones`),
+          apiFetch(`${API_BASE_URL}/profiles/${resolvedUsername}/webhooks`),
+          apiFetch(`${API_BASE_URL}/profiles/${resolvedUsername}`),
         ]);
 
         if (statsRes.ok) {
