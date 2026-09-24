@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { getWalletAdapter, type WalletId } from "@/lib/wallet-adapters";
+import { getStoredWalletAddress } from "@/lib/wallet-adapters";
 
 export function EditProfileButton({
   username,
@@ -14,24 +14,8 @@ export function EditProfileButton({
   const [isOwner, setIsOwner] = useState(false);
 
   useEffect(() => {
-    async function resolveConnectedWallet() {
-      try {
-        const walletId =
-          typeof window !== "undefined"
-            ? (localStorage.getItem("walletId") as WalletId | null)
-            : null;
-        const adapter = walletId ? getWalletAdapter(walletId) : undefined;
-        if (!adapter) {
-          setIsOwner(false);
-          return;
-        }
-        const address = await adapter.connect().catch(() => "");
-        setIsOwner(Boolean(address && address === walletAddress));
-      } catch {
-        setIsOwner(false);
-      }
-    }
-    resolveConnectedWallet();
+    const storedAddress = getStoredWalletAddress();
+    setIsOwner(Boolean(storedAddress && storedAddress === walletAddress));
   }, [walletAddress]);
 
   if (!isOwner) return null;

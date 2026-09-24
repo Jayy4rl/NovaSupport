@@ -4274,9 +4274,10 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     try {
       const username = req.params.username as string;
       const milestoneId = req.params.milestoneId as string;
-      
+
       const profile = await prisma.profile.findUnique({
         where: { username },
+        include: { acceptedAssets: true },
       });
 
       if (!profile) {
@@ -4310,6 +4311,20 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       const assetChanging =
         (parsed.data.assetCode !== undefined && parsed.data.assetCode !== milestone.assetCode) ||
         (parsed.data.assetIssuer !== undefined && parsed.data.assetIssuer !== milestone.assetIssuer);
+
+      // Validate new asset against accepted assets if asset is being changed
+      if (assetChanging) {
+        const newAssetCode = parsed.data.assetCode ?? milestone.assetCode;
+        const newAssetIssuer = parsed.data.assetIssuer ?? milestone.assetIssuer;
+        const acceptedCodes = profile.acceptedAssets.map((a: { code: string }) => a.code);
+        if (acceptedCodes.length > 0 && !isAcceptedAssetPair(profile.acceptedAssets, newAssetCode, newAssetIssuer ?? null)) {
+          return sendError(
+            res,
+            400,
+            `Asset '${newAssetCode}'${newAssetIssuer ? ` (issuer ${newAssetIssuer})` : ""} is not accepted by this profile. Accepted: ${acceptedCodes.join(", ")}`,
+          );
+        }
+      }
 
       const data: typeof parsed.data & {
         currentAmount?: number;
@@ -4472,8 +4487,11 @@ All errors return JSON with an \`error\` field and optional \`code\`:
         return sendError(res, 400, "Invalid Stellar address");
       }
 
-      const limit = Math.min(parseInt(req.query.limit as string) || 10, 100);
-      const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
+      const pagination = paginationSchema.safeParse(req.query);
+      if (!pagination.success) {
+        return sendError(res, 400, "Invalid pagination parameters");
+      }
+      const { limit, offset } = pagination.data;
 
       const whereClause = { supporterAddress: address };
 
