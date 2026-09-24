@@ -308,14 +308,15 @@ stellar contract invoke \
   --network testnet \
   --source mykey \
   -- support \
-  --supporter <SUPPORTER_ADDRESS> \
-  --recipient <RECIPIENT_ADDRESS> \
-  --amount 10000000 \
-  --asset_code XLM \
-  --message "Great work!"
+  --s <SUPPORTER_ADDRESS> \
+  --r <RECIPIENT_ADDRESS> \
+  --asset <ASSET_ADDRESS> \
+  --o 10000000 \
+  --c XLM \
+  --m "Great work!"
 ```
 
-**Note:** The `amount` is in stroops (1 XLM = 10,000,000 stroops).
+**Note:** The `amount` (`--o`) is in stroops (1 XLM = 10,000,000 stroops).
 
 ### JavaScript Example
 
@@ -350,6 +351,9 @@ const tx = new TransactionBuilder(account, {
         type: "address",
       }),
       nativeToScVal(Address.fromString("<RECIPIENT_ADDRESS>"), {
+        type: "address",
+      }),
+      nativeToScVal(Address.fromString("<ASSET_ADDRESS>"), {
         type: "address",
       }),
       nativeToScVal(10000000, { type: "i128" }), // amount in stroops

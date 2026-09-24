@@ -153,7 +153,7 @@ Behavior:
 - Rejects calls if `amount` exceeds the recipient's recorded balance for this asset.
 - Checks the contract's actual token balance; rejects if insufficient (`InsufficientContractBalance`).
 - Transfers `amount` tokens from the contract to `recipient`.
-- Deducts `amount` from `RecipientTotal`.
+- Deducts `amount` from `RecipientTotal` for this recipient and asset pair.
 - Emits a `withdraw` event with the caller, asset, and amount.
 
 Errors:
@@ -196,7 +196,7 @@ Returns:
 
 ### `get_recipient_total(env, recipient, asset) -> i128`
 
-Returns the total amount of a specific asset received by a specific recipient (including withdrawals deducted). Mirrors `get_total_by_asset` and reads from the same `RecipientTotal(Address, Address)` storage key.
+Returns the total amount of a specific asset received by a specific recipient (including withdrawals deducted). Mirrors `get_total_by_asset` and reads from the same `RecipientTotal(Address, Address)` storage key (keyed by recipient and asset, returning a per-asset total rather than an aggregate across assets).
 
 Parameters:
 
@@ -284,7 +284,7 @@ Event fields (tuple):
 | --- | --- | --- |
 | `SupportCount` | `u32` | Global count of successful `support()` calls stored in persistent storage. |
 | `RecipientCount(Address)` | `u32` | Per-recipient count of support actions received. |
-| `RecipientTotal(Address, Address)` | `i128` | Per-recipient, per-asset total amount received (reduced by withdrawals). First address is the recipient, second is the asset token contract. |
+| `RecipientTotal(Address, Address)` | `i128` | Per-recipient, per-asset total amount received (reduced by withdrawals). Keyed by recipient address and asset token contract (first address is recipient, second is asset), representing a per-asset total rather than an aggregate across assets. |
 | `Admin` | `Address` | Contract administrator address. Set during `initialize()`. |
 | `Paused` | `bool` | Whether the contract is paused. Toggled by `pause()` / `unpause()`. |
 

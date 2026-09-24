@@ -153,7 +153,7 @@ All pull requests must pass the following CI status checks before merging to `ma
 
 - **Frontend CI** — installs dependencies, runs lint, and builds the Next.js app (`npm run build`)
 - **Backend CI** — generates the Prisma client, applies migrations, runs backend tests (`npm run test`), and compiles TypeScript (`npm run build`)
-- **Contract CI** — builds the contract for native and WASM targets (`cargo build --release`) and runs contract tests (`cargo test`)
+- **Contract CI** — runs contract tests (`cargo test`) and builds the contract for the WASM target (`cargo build --target wasm32-unknown-unknown --release`)
 
 Each workflow runs on `pull_request` / `pull_request_target` events for its respective directory and on `push` to `main`.
 
