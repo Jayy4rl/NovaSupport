@@ -79,10 +79,16 @@ async function suiteBasicVerification() {
     assert.strictEqual(await verifyTransaction(server, "hash1"), false);
   });
 
-  await test("unreachable Horizon (non-404 error) returns 'error'", async () => {
+  await test("unreachable Horizon (non-404 error) throws", async () => {
     const err = Object.assign(new Error("ECONNREFUSED"), { code: "ECONNREFUSED" });
     const server = makeMockServer({ txResult: err });
-    assert.strictEqual(await verifyTransaction(server, "hash2", 1, 10), "error");
+    await assert.rejects(
+      async () => verifyTransaction(server, "hash2", 1, 10),
+      (caught: any) => {
+        assert.ok(caught instanceof Error, "Should throw an Error");
+        return true;
+      }
+    );
   });
 
   await test("transaction exists and is successful returns true", async () => {
