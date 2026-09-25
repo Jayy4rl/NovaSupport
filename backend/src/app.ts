@@ -444,6 +444,12 @@ function createAnalyticsCsv(transactions: any[]): string {
 export function createApp(customLogger?: Logger) {
   const app = express();
   const {
+
+  // Issue #1259: Configure trust-proxy so req.ip reflects the real client address
+  // behind reverse proxies/load balancers, not the proxy's own IP.
+  // This is required for all IP-based rate limiting and abuse detection to work correctly.
+  app.set("trust proxy", true);
+
     globalLimiter,
     writeLimiter,
     exportLimiter,
