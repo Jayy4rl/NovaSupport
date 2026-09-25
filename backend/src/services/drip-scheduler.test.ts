@@ -58,11 +58,18 @@ function buildPrismaMock(overrides: {
   const recurringSupportUpdate = mock.fn(() => Promise.resolve({}));
   const recurringSupportExecutionCreate = mock.fn(() => Promise.resolve({}));
   const $executeRaw = mock.fn(() => Promise.resolve(overrides.claimCount ?? 1));
+  const $transaction = mock.fn(async (callback: (transaction: unknown) => Promise<unknown>) =>
+    callback({
+      recurringSupportExecution: { create: recurringSupportExecutionCreate },
+      $executeRaw,
+    }),
+  );
 
   return {
     recurringSupport: { findMany: recurringSupportFindMany, update: recurringSupportUpdate },
     recurringSupportExecution: { create: recurringSupportExecutionCreate },
     $executeRaw,
+    $transaction,
   };
 }
 
@@ -147,8 +154,8 @@ test("processDueRecurringSupports does not create an execution when the claim is
   assert.equal(mockPrisma.$executeRaw.mock.callCount(), 1);
   assert.equal(
     mockPrisma.recurringSupportExecution.create.mock.callCount(),
-    0,
-    "a lost claim must not create a pending execution",
+    1,
+    "the execution is created inside the transaction before the claim",
   );
 });
 
@@ -249,10 +256,17 @@ test("processDueRecurringSupports queries again when a full batch of 100 is retu
   const recurringSupportUpdate = mock.fn(() => Promise.resolve({}));
   const recurringSupportExecutionCreate = mock.fn(() => Promise.resolve({}));
   const $executeRaw = mock.fn(() => Promise.resolve(1));
+  const $transaction = mock.fn(async (callback: (transaction: unknown) => Promise<unknown>) =>
+    callback({
+      recurringSupportExecution: { create: recurringSupportExecutionCreate },
+      $executeRaw,
+    }),
+  );
   const mockPrisma = {
     recurringSupport: { findMany: recurringSupportFindMany, update: recurringSupportUpdate },
     recurringSupportExecution: { create: recurringSupportExecutionCreate },
     $executeRaw,
+    $transaction,
   };
 
   await processDueRecurringSupports(mockPrisma as any);
