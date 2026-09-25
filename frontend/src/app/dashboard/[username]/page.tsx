@@ -466,13 +466,20 @@ export default function DashboardPage() {
     let cancelled = false;
 
     async function fetchDrips() {
+      // Only the profile owner may see this profile's drips. Without a
+      // profileId the endpoint falls back to the viewer's own pledges, which
+      // must never be rendered on someone else's dashboard.
+      if (!isOwner) {
+        setDrips([]);
+        setDripsLoading(false);
+        return;
+      }
+
       setDripsLoading(true);
       try {
-        const endpoint = isOwner
-          ? `${API_BASE_URL}/v1/recurring-support?profileId=${username}`
-          : `${API_BASE_URL}/v1/recurring-support`;
-
-        const res = await apiFetch(endpoint);
+        const res = await apiFetch(
+          `${API_BASE_URL}/v1/recurring-support?profileId=${encodeURIComponent(username)}`,
+        );
 
         if (!cancelled) {
           if (res.ok) {
