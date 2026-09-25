@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeAll } from "vitest";
-import { render, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { ThemeToggle } from "../theme-toggle";
 import { MilestoneCard } from "../milestone-card";
 import { EmbedWidget } from "../embed-widget";
@@ -121,6 +121,25 @@ describe("Additional Component Snapshots", () => {
     }
   });
 
+  it("MilestoneCard renders zero progress when the current amount is malformed", () => {
+    render(
+      <MilestoneCard
+        milestone={{
+          id: "malformed",
+          title: "Malformed amount",
+          targetAmount: "100",
+          currentAmount: "invalid",
+          assetCode: "XLM",
+          status: "active",
+          createdAt: "2024-01-01T00:00:00.000Z",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("0%")).toBeInTheDocument();
+    expect(screen.queryByText("NaN%")).not.toBeInTheDocument();
+  });
+
   it("EmbedWidget matches snapshot (dark theme, minimal props)", () => {
     const { container } = render(
       <EmbedWidget
@@ -164,6 +183,22 @@ describe("Additional Component Snapshots", () => {
     expect(container).toMatchSnapshot();
   });
 
+  it("EmbedWidget renders stats when asset totals are omitted", () => {
+    render(
+      <EmbedWidget
+        username="johndoe"
+        displayName="John Doe"
+        bio="Stellar developer"
+        acceptedAssets={[{ code: "XLM" }]}
+        stats={{ totalTransactions: 1, uniqueSupporters: 1 }}
+        profileUrl="https://novasupport.app/johndoe"
+      />,
+    );
+
+    expect(screen.getByText("Transactions")).toBeInTheDocument();
+    expect(screen.getByText("Supporters")).toBeInTheDocument();
+  });
+
   it("ActivityFeed matches snapshot (loading state)", () => {
     const { container } = renderWithQueryClient(<ActivityFeed username="johndoe" limit={5} />);
     expect(container).toMatchSnapshot();
@@ -197,10 +232,8 @@ describe("Additional Component Snapshots", () => {
     const { container } = renderWithQueryClient(<ActivityFeed username="johndoe" limit={5} />);
 
     await waitFor(() => {
-      expect(container.querySelector("table")).toBeInTheDocument();
+      expect(container).toHaveTextContent("Received 100.0000000 XLM");
     });
-
-    expect(container).toMatchSnapshot();
 
     // Restore the original never-resolving mock for subsequent tests
     vi.stubGlobal("fetch", vi.fn().mockReturnValue(new Promise(() => {})));

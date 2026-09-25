@@ -81,7 +81,9 @@ function ConfettiBurst() {
 export function MilestoneCard({ milestone, index = 0 }: MilestoneCardProps) {
   const current = parseFloat(milestone.currentAmount);
   const target = parseFloat(milestone.targetAmount);
-  const progress = target > 0 ? Math.min((current / target) * 100, 100) : 0;
+  const progress = Number.isFinite(current) && Number.isFinite(target) && target > 0
+    ? Math.min((current / target) * 100, 100)
+    : 0;
   const isReached = milestone.status === "reached" || progress >= 100;
 
   return (
