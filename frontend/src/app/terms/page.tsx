@@ -12,6 +12,12 @@ export const metadata: Metadata = {
       "Read the NovaSupport Terms of Service for the Stellar-native creator support platform.",
     type: "website",
   },
+  twitter: {
+    card: "summary",
+    title: "Terms of Service · NovaSupport",
+    description:
+      "Read the NovaSupport Terms of Service for the Stellar-native creator support platform.",
+  },
 };
 
 export default function TermsPage() {
