@@ -23,7 +23,6 @@ Key error categories:
 - **Contract state errors** (200-299): Initialization, pause state
 - **Balance and transfer errors** (300-399): Insufficient funds, withdrawal limits
 - **Storage and data errors** (400-499): Missing data, recipient not found
-- **Asset and token errors** (500-599): Invalid assets, token client issues
 
 ## Why It Is Small
 
@@ -222,11 +221,11 @@ stellar contract invoke --network testnet-alt ...
 3. **Verify contract state:**
 
    ```bash
-   # Check if contract is initialized
-   stellar contract invoke --id <CONTRACT_ID> --network testnet -- is_initialized
+   # Check contract support count
+   stellar contract invoke --id <CONTRACT_ID> --network testnet -- support_count
 
-   # Check pause status
-   stellar contract invoke --id <CONTRACT_ID> --network testnet -- is_paused
+   # Check total by asset
+   stellar contract invoke --id <CONTRACT_ID> --network testnet -- get_total_by_asset --asset_code XLM
    ```
 
 4. **Test with Stellar Laboratory:**
@@ -309,14 +308,15 @@ stellar contract invoke \
   --network testnet \
   --source mykey \
   -- support \
-  --supporter <SUPPORTER_ADDRESS> \
-  --recipient <RECIPIENT_ADDRESS> \
-  --amount 10000000 \
-  --asset_code XLM \
-  --message "Great work!"
+  --s <SUPPORTER_ADDRESS> \
+  --r <RECIPIENT_ADDRESS> \
+  --asset <ASSET_ADDRESS> \
+  --o 10000000 \
+  --c XLM \
+  --m "Great work!"
 ```
 
-**Note:** The `amount` is in stroops (1 XLM = 10,000,000 stroops).
+**Note:** The `amount` (`--o`) is in stroops (1 XLM = 10,000,000 stroops).
 
 ### JavaScript Example
 
@@ -351,6 +351,9 @@ const tx = new TransactionBuilder(account, {
         type: "address",
       }),
       nativeToScVal(Address.fromString("<RECIPIENT_ADDRESS>"), {
+        type: "address",
+      }),
+      nativeToScVal(Address.fromString("<ASSET_ADDRESS>"), {
         type: "address",
       }),
       nativeToScVal(10000000, { type: "i128" }), // amount in stroops

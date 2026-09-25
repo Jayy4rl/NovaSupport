@@ -40,9 +40,10 @@ changes to the contract.
 - **No duplicate-support prevention.** The same `supporter` can call `support()` multiple
   times for the same `recipient`. `SupportCount` is a global counter, not per-supporter.
 
-- **No message validation.** `message` is accepted as any `soroban_sdk::String` and placed
-  directly into the emitted event. The contract does not enforce length limits, content
-  policy, or encoding beyond what the Soroban host imposes.
+- **Limited message validation.** `message` must be non-empty and no longer than 280
+  characters (`support()` returns `EmptyMessage` / `MessageTooLong` otherwise). Beyond that
+  length check, the contract does not enforce content policy or encoding beyond what the
+  Soroban host imposes.
 
 - **No asset verification.** `asset_code` is a free-form string. The contract does not
   verify that the string corresponds to a real Stellar asset or matches the payment
@@ -59,7 +60,7 @@ changes to the contract.
   authorize pause/unpause operations via `require_auth()`. An upgrade path does not exist;
   contract code is immutable once deployed.
 
-- **Immutable once deployed.** The contract has no `upgrade` entry point or admin key. Once deployed to a contract ID, the WASM cannot be altered. This ensures that the logic seen at the time of deployment is what will always execute for that ID. Any "upgrade" requires deploying a new contract instance and updating the platform to use the new ID.
+- **Immutable once deployed.** The contract has no `upgrade` entry point. Once deployed to a contract ID, the WASM cannot be altered, and the admin key confers no upgrade authority. This ensures that the logic seen at the time of deployment is what will always execute for that ID. Any "upgrade" requires deploying a new contract instance and updating the platform to use the new ID.
 
 - **Events are trusted as-is.** The backend and frontend are responsible for validating
   event data. The contract emits whatever values it receives; it does not cross-check

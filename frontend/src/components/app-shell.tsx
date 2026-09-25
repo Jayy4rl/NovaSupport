@@ -22,6 +22,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [isSearching, setIsSearching] = useState(false);
   const searchRef = useRef<HTMLDivElement>(null);
   const timeoutRef = useRef<NodeJS.Timeout>();
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -53,34 +54,50 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       clearTimeout(timeoutRef.current);
     }
 
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
     if (!searchQuery.trim()) {
       setSearchResults([]);
       setShowDropdown(false);
       return;
     }
 
+    // Open the dropdown up front. It used to be opened only once results came
+    // back, in the same tick that cleared isSearching — so the "Searching…"
+    // state was never actually rendered for a fresh search (#1063).
     setIsSearching(true);
+    setShowDropdown(true);
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     timeoutRef.current = setTimeout(async () => {
       try {
         const response = await fetch(
           `${API_BASE_URL}/profiles/search?q=${encodeURIComponent(searchQuery)}`,
+          { signal: controller.signal },
         );
 
         if (response.ok) {
           const data = await response.json();
           setSearchResults(data);
-          setShowDropdown(true);
         } else {
+          // A failed lookup closes the dropdown rather than claiming
+          // "No results found", which would misreport the failure.
           setSearchResults([]);
           setShowDropdown(false);
         }
       } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
         console.error("Search error:", error);
         setSearchResults([]);
         setShowDropdown(false);
       } finally {
-        setIsSearching(false);
+        if (!controller.signal.aborted) {
+          setIsSearching(false);
+        }
       }
     }, 300);
 
@@ -88,6 +105,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
       }
+      controller.abort();
     };
   }, [searchQuery]);
 
@@ -177,7 +195,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                           />
                         ) : (
                           <div className="h-10 w-10 rounded-full bg-gradient-to-br from-mint to-gold flex items-center justify-center text-sm font-bold text-ink">
-                            {result.displayName[0].toUpperCase()}
+                            {(result.displayName?.[0] || '?').toUpperCase()}
                           </div>
                         )}
                         <div className="flex-1 min-w-0">

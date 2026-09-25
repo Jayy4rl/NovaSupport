@@ -87,10 +87,16 @@ async function fetchActivities(username: string, signal?: AbortSignal): Promise<
     ? await transactionsRes.json()
     : { transactions: [] };
 
-  const milestonesUnavailable = milestonesRes?.ok !== true;
-  const milestonesData = !milestonesUnavailable
-    ? await milestonesRes!.json()
-    : { milestones: [] };
+  let milestonesUnavailable = milestonesRes?.ok !== true;
+  let milestonesData = { milestones: [] };
+
+  if (!milestonesUnavailable) {
+    try {
+      milestonesData = await milestonesRes!.json();
+    } catch {
+      milestonesUnavailable = true;
+    }
+  }
 
   const items: ActivityItem[] = [];
 

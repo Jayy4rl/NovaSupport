@@ -95,6 +95,8 @@ export class EventIndexer {
   private stopped = false;
   private timer: NodeJS.Timeout | null = null;
   private currentTick: Promise<void> | null = null;
+  /** Pages consumed since the last time the drain loop paused. Reset once the burst ends. */
+  private pagesConsumedInBurst = 0;
 
   constructor(options: EventIndexerOptions) {
     this.prisma = options.prisma;
@@ -195,6 +197,11 @@ export class EventIndexer {
             message: event.message,
             profileId,
             status: "SUCCESS",
+            // Use the on-chain event timestamp so that backfilled transactions
+            // are stamped with when they actually occurred, not when the indexer
+            // ingested them. Without this, historical backfills corrupt
+            // date-range queries, the weekly digest, and tax-year CSV exports.
+            createdAt: event.emittedAt,
           },
         });
         // Heuristic: assume createdAt == updatedAt means this was an INSERT.
@@ -227,6 +234,11 @@ export class EventIndexer {
       take: 100,
     });
 
+    const trueBacklog = await this.prisma.supportTransaction.count({
+      where: { profileId: "__orphan__" },
+    });
+    Metrics.orphanCount(trueBacklog);
+
     if (orphans.length === 0) return 0;
 
     // Collect unique recipient addresses to look up in one query
@@ -253,7 +265,6 @@ export class EventIndexer {
       logger.info({ resolved }, "resolved orphaned transactions to profiles");
     }
 
-    Metrics.orphanCount(orphans.length - resolved);
     return resolved;
   }
 
@@ -328,9 +339,13 @@ export class EventIndexer {
     // Process exactly one page per tick so the event loop is never blocked by a
     // massive backfill. When more pages are available we reschedule with a 0 ms
     // delay (fast drain) rather than holding all pages in memory simultaneously.
+    // `maxPagesPerTick` caps how many pages we drain back-to-back before
+    // yielding for a full `pollIntervalMs`, so a huge backlog can't starve the
+    // rest of the process.
     let delay = this.pollIntervalMs;
     try {
       const { ingested, nextCursor } = await this.pollOnce();
+      this.pagesConsumedInBurst += 1;
       if (ingested > 0) {
         Metrics.eventsIngested(ingested);
         Metrics.eventIndexerLastSuccess(Date.now());
@@ -338,8 +353,20 @@ export class EventIndexer {
           { ingested, contractId: this.contractId },
           "indexed events",
         );
-        // More pages available — re-enter immediately but yield to the event loop.
-        if (nextCursor !== null) delay = 0;
+      }
+      // More pages available — re-enter immediately but yield to the event loop,
+      // unless we've hit the per-tick page cap; in that case defer the rest of
+      // the backlog to a future tick.
+      if (nextCursor !== null && this.pagesConsumedInBurst < this.maxPagesPerTick) {
+        delay = 0;
+      } else {
+        if (nextCursor !== null) {
+          logger.info(
+            { maxPagesPerTick: this.maxPagesPerTick, contractId: this.contractId },
+            "event indexer hit maxPagesPerTick; deferring remaining backlog",
+          );
+        }
+        this.pagesConsumedInBurst = 0;
       }
 
       await this.resolveOrphans().catch((err) => {

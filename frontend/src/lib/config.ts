@@ -1,6 +1,6 @@
 const DEFAULTS: Record<string, string> = {
   NEXT_PUBLIC_HORIZON_URL: "https://horizon-testnet.stellar.org",
-  NEXT_PUBLIC_API_BASE_URL: "http://localhost:3001",
+  NEXT_PUBLIC_API_BASE_URL: "http://localhost:4001",
 };
 
 function requireEnv(key: string): string {

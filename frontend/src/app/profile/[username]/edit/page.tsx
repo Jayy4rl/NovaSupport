@@ -113,11 +113,13 @@ export default function EditProfilePage() {
         if (!connectedAddress) {
           // Wallet not connected or Freighter is locked — show a prompt instead of silently redirecting
           setWalletPrompt("locked");
+          setOwnershipChecked(true);
           return;
         }
 
         if (connectedAddress !== profile.walletAddress) {
           setWalletPrompt("not-owner");
+          setOwnershipChecked(true);
           return;
         }
 
@@ -138,6 +140,7 @@ export default function EditProfilePage() {
         );
       } catch {
         setAuthError("Failed to load profile.");
+        setOwnershipChecked(true);
       } finally {
         setLoading(false);
       }
@@ -162,8 +165,11 @@ export default function EditProfilePage() {
     setAssetError(null);
   }
 
-  function removeAsset(code: string) {
-    setAssets((prev) => prev.filter((a) => a.code !== code));
+  function removeAsset(code: string, issuer?: string | null) {
+    const issuerToRemove = issuer ?? "";
+    setAssets((prev) =>
+      prev.filter((a) => a.code !== code || (a.issuer ?? "") !== issuerToRemove),
+    );
   }
 
   async function onSubmit(values: EditProfileFormValues) {
@@ -381,14 +387,14 @@ export default function EditProfilePage() {
             <div className="flex flex-wrap gap-2">
               {assets.map((a) => (
                 <span
-                  key={a.code}
+                  key={`${a.code}:${a.issuer ?? ""}`}
                   className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-sm text-white"
                 >
                   {a.code}
                   <button
                     type="button"
-                    onClick={() => removeAsset(a.code)}
-                    aria-label={`Remove ${a.code}`}
+                    onClick={() => removeAsset(a.code, a.issuer)}
+                    aria-label={`Remove ${a.code}${a.issuer ? ` issued by ${a.issuer}` : ""}`}
                     className="text-steel hover:text-red-400 transition-colors leading-none"
                   >
                     ×

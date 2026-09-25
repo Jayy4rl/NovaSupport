@@ -1,10 +1,15 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "../db.js";
-import { sendEmail } from "../mailer.js";
+import { sendEmail as defaultSendEmail } from "../mailer.js";
 import { logger } from "../logger.js";
+import { escapeHtml } from "./email.js";
 
 const PROFILE_BATCH_SIZE = 100;
 
-export async function sendWeeklyDigests(prismaClient = prisma) {
+export async function sendWeeklyDigests(
+  prismaClient = prisma,
+  sendEmailFn: typeof defaultSendEmail = defaultSendEmail,
+) {
   let cursor: string | undefined;
   let totalProfilesEmailed = 0;
   let totalErrors = 0;
@@ -48,6 +53,7 @@ export async function sendWeeklyDigests(prismaClient = prisma) {
             where: {
               profileId: profile.id,
               supporterAddress: { not: null },
+              status: { not: "failed" },
               createdAt: { gte: sevenDaysAgo },
             },
             distinct: ["supporterAddress"],
@@ -57,7 +63,7 @@ export async function sendWeeklyDigests(prismaClient = prisma) {
             where: {
               profileId: profile.id,
               status: "reached",
-              updatedAt: { gte: sevenDaysAgo },
+              reachedAt: { gte: sevenDaysAgo },
             },
           }),
           prismaClient.supportTransaction.groupBy({
@@ -82,7 +88,7 @@ export async function sendWeeklyDigests(prismaClient = prisma) {
         if (txCount === 0) continue;
 
         const assetBreakdown = assetGroups
-          .map((g) => `${g._sum.amount?.toString() ?? "0"} ${g.assetCode}`)
+          .map((g) => `${g._sum.amount?.toString() ?? "0"} ${escapeHtml(g.assetCode)}`)
           .join(", ");
 
         const milestonesSection =
@@ -109,7 +115,7 @@ export async function sendWeeklyDigests(prismaClient = prisma) {
 
         const html = `
         <h2>Your Weekly NovaSupport Recap</h2>
-        <p>Here's what happened with your profile <strong>${profile.displayName}</strong> this week:</p>
+        <p>Here's what happened with your profile <strong>${escapeHtml(profile.displayName)}</strong> this week:</p>
         <ul>
           <li><strong>Total received:</strong> ${assetBreakdown}</li>
           <li><strong>Transactions:</strong> ${txCount}</li>
@@ -117,7 +123,7 @@ export async function sendWeeklyDigests(prismaClient = prisma) {
         </ul>
         ${milestonesSection}
         <br/>
-        <p><a href="https://novasupport.xyz/${profile.username}">View your profile</a></p>
+        <p><a href="https://novasupport.xyz/${encodeURIComponent(profile.username)}">View your profile</a></p>
         <br/>
         <p>Thanks,<br/>The NovaSupport Team</p>
         <br/>
@@ -127,7 +133,7 @@ export async function sendWeeklyDigests(prismaClient = prisma) {
         </p>
       `;
 
-        await sendEmail({
+        await sendEmailFn({
           to: profile.email!,
           subject: "Your NovaSupport weekly recap",
           text,
@@ -161,51 +167,34 @@ export async function sendWeeklyDigests(prismaClient = prisma) {
 const WEEKLY_DIGEST_JOB_NAME = "weekly-digest";
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
-/**
- * Read the persisted last-run timestamp from the database.
- * Returns null when no record exists (i.e. the job has never run).
- */
-async function getLastDigestRunAt(): Promise<Date | null> {
-  const row = await prisma.schedulerJob.findUnique({
-    where: { name: WEEKLY_DIGEST_JOB_NAME },
-  });
-  return row?.lastRunAt ?? null;
+async function claimWeeklyDigestRun(
+  prismaClient = prisma,
+  now = new Date(),
+): Promise<boolean> {
+  const dueBefore = new Date(now.getTime() - SEVEN_DAYS_MS);
+  const claimed = await prismaClient.$queryRaw<Array<{ name: string }>>(Prisma.sql`
+    INSERT INTO "scheduler_jobs" ("name", "lastRunAt", "updatedAt")
+    VALUES (${WEEKLY_DIGEST_JOB_NAME}, ${now}, ${now})
+    ON CONFLICT ("name") DO UPDATE
+      SET "lastRunAt" = EXCLUDED."lastRunAt", "updatedAt" = EXCLUDED."updatedAt"
+      WHERE "scheduler_jobs"."lastRunAt" <= ${dueBefore}
+    RETURNING "name"
+  `);
+  return claimed.length > 0;
 }
 
 /**
- * Persist the current time as the last-run timestamp for the weekly digest.
- * Called immediately after a successful digest run so that a subsequent
- * process restart does not re-fire the job prematurely (#592).
- */
-async function markDigestRunAt(at: Date): Promise<void> {
-  await prisma.schedulerJob.upsert({
-    where: { name: WEEKLY_DIGEST_JOB_NAME },
-    create: { name: WEEKLY_DIGEST_JOB_NAME, lastRunAt: at },
-    update: { lastRunAt: at },
-  });
-}
-
-/**
- * Run the weekly digest only if at least 7 days have elapsed since the last
- * successful run. Guards against re-firing on every process restart (#592).
+ * Claim and run the weekly digest only if at least 7 days have elapsed since
+ * the previous claim.
  */
 async function maybeRunWeeklyDigest(): Promise<void> {
-  const lastRunAt = await getLastDigestRunAt();
-  const now = Date.now();
-
-  if (lastRunAt !== null && now - lastRunAt.getTime() < SEVEN_DAYS_MS) {
-    const msUntilDue = SEVEN_DAYS_MS - (now - lastRunAt.getTime());
-    const hoursUntilDue = Math.ceil(msUntilDue / (60 * 60 * 1000));
-    logger.info(
-      { lastRunAt, hoursUntilDue },
-      "Weekly digest skipped — not yet due",
-    );
+  const runAt = new Date();
+  if (!(await claimWeeklyDigestRun(prisma, runAt))) {
+    logger.info("Weekly digest skipped — not yet due or already claimed");
     return;
   }
 
-  const runAt = new Date(now);
   await sendWeeklyDigests();
-  await markDigestRunAt(runAt);
 }
 
 let digestInterval: ReturnType<typeof setInterval> | null = null;

@@ -6,8 +6,7 @@ import { AppShell } from "@/components/app-shell";
 import { Toast } from "@/components/toast";
 import { NotificationPreferences } from "@/components/notification-preferences";
 import { apiFetch } from "@/lib/api-client";
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
+import { API_BASE_URL } from "@/lib/config";
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -20,20 +19,38 @@ export default function SettingsPage() {
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   useEffect(() => {
-    const storedUsername = localStorage.getItem("username");
-    if (!storedUsername) {
-      router.push("/");
-      return;
-    }
-    setUsername(storedUsername);
+    async function loadCurrentUser() {
+      try {
+        const meRes = await apiFetch(`${API_BASE_URL}/auth/me`, {
+          suppressAuthExpired: true,
+        } as RequestInit & { suppressAuthExpired?: boolean });
+        if (!meRes.ok) {
+          router.push("/");
+          return;
+        }
 
-    apiFetch(`${API_BASE_URL}/profiles/${storedUsername}`)
-      .then(async (res) => {
-        if (!res.ok) return;
-        const data = await res.json();
-        setEmailVerified(Boolean(data.emailVerified));
-      })
-      .finally(() => setLoading(false));
+        const me = await meRes.json();
+        const resolvedUsername = typeof me?.username === "string" ? me.username : null;
+        if (!resolvedUsername) {
+          router.push("/");
+          return;
+        }
+
+        setUsername(resolvedUsername);
+
+        const profileRes = await apiFetch(`${API_BASE_URL}/profiles/${resolvedUsername}`);
+        if (profileRes.ok) {
+          const data = await profileRes.json();
+          setEmailVerified(Boolean(data.emailVerified));
+        }
+      } catch {
+        router.push("/");
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadCurrentUser();
   }, [router]);
 
   async function handleResendVerification() {
@@ -61,6 +78,11 @@ export default function SettingsPage() {
     try {
       const res = await apiFetch(`${API_BASE_URL}/profiles/${username}`, { method: "DELETE" });
       if (!res.ok) throw new Error("Failed to delete profile");
+
+      // Revoke the JWT server-side so it can't keep authenticating requests
+      // as the now-deleted profile for the rest of its 1h expiry.
+      await apiFetch(`${API_BASE_URL}/v1/auth/logout`, { method: "POST" }).catch(() => {});
+
       localStorage.removeItem("username");
       router.push("/");
     } catch (err: unknown) {

@@ -84,6 +84,23 @@ export async function processDueRecurringSupports(prismaClient = prisma, now = n
           recurringSupportId: support.id,
           status: "pending",
         },
+      await prismaClient.$transaction(async (transaction) => {
+        await transaction.recurringSupportExecution.create({
+          data: {
+            recurringSupportId: support.id,
+            status: "pending",
+          },
+        });
+
+        const claimed = await transaction.$executeRaw`
+          UPDATE "RecurringSupport"
+          SET "nextRunAt" = ${nextRunAt}
+          WHERE id = ${support.id} AND "nextRunAt" <= ${now} AND "status" = 'active'
+        `;
+
+        if (claimed === 0) {
+          throw new Error("Recurring support was already claimed");
+        }
       });
 
       logger.info({

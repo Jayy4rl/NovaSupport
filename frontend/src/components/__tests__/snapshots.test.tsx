@@ -1,3 +1,4 @@
+import React from "react";
 import { describe, it, expect, vi } from "vitest";
 import { render } from "@testing-library/react";
 import { ProfileSkeleton } from "../profile-skeleton";
@@ -8,14 +9,24 @@ import { ProfileTabs } from "../profile-tabs";
 import { AppShell } from "../app-shell";
 
 // Mock dependencies
-vi.mock("framer-motion", () => ({
-  motion: {
-    div: ({ children, ...props }: any) => <div {...props}>{children}</div>,
-  },
-  AnimatePresence: ({ children }: any) => <>{children}</>,
-}));
+vi.mock("framer-motion", () => {
+  // Passthrough for any motion.<element>, not just the handful used today.
+  const motion = new Proxy(
+    {},
+    {
+      get: (_target, tag: string) => {
+        const Passthrough = ({ children, ...props }: any) =>
+          React.createElement(tag, props, children);
+        Passthrough.displayName = `motion.${tag}`;
+        return Passthrough;
+      },
+    },
+  );
+  return { motion, AnimatePresence: ({ children }: any) => children };
+});
 
-vi.mock("lucide-react", () => ({
+vi.mock("lucide-react", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("lucide-react")>()),
   History: () => <span>HistoryIcon</span>,
   Award: () => <span>AwardIcon</span>,
   LayoutDashboard: () => <span>DashboardIcon</span>,
@@ -29,12 +40,14 @@ vi.mock("next/link", () => ({
   default: ({ children, href }: any) => <a href={href}>{children}</a>,
 }));
 
-vi.mock("@/lib/config", () => ({
+vi.mock("@/lib/config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/config")>()),
   API_BASE_URL: "http://localhost:4000",
   SITE_URL: "https://novasupport.app",
 }));
 
-vi.mock("@/lib/stellar", () => ({
+vi.mock("@/lib/stellar", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/stellar")>()),
   getNetworkLabel: vi.fn(() => "Testnet"),
 }));
 
@@ -60,12 +73,12 @@ describe("Component Snapshots", () => {
   });
 
   it("Toast matches snapshot (success)", () => {
-    const { container } = render(<Toast message="Success!" type="success" onClose={() => {}} />);
+    const { container } = render(<Toast message="Success!" type="success" onDismiss={() => {}} />);
     expect(container).toMatchSnapshot();
   });
 
   it("Toast matches snapshot (error)", () => {
-    const { container } = render(<Toast message="Error!" type="error" onClose={() => {}} />);
+    const { container } = render(<Toast message="Error!" type="error" onDismiss={() => {}} />);
     expect(container).toMatchSnapshot();
   });
 

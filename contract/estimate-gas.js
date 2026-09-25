@@ -3,12 +3,17 @@
  * Gas estimation script for the NovaSupport support() contract function.
  *
  * Usage:
- *   node estimate-gas.js [--network testnet|mainnet] [--message-length <n>]
+ *   node estimate-gas.js
+ *
+ * Environment variables:
+ *   RPC_URL             - Soroban RPC endpoint (default: testnet)
+ *   NETWORK_PASSPHRASE  - Stellar network passphrase (default: testnet)
+ *   CONTRACT_ID         - Deployed support_page contract address
+ *   SUPPORTER_SECRET    - Secret key for the simulated supporter account
+ *   RECIPIENT_ADDRESS   - G... address of the simulated recipient
  *
  * Prerequisites:
  *   npm install @stellar/stellar-sdk
- *
- * Set CONTRACT_ID and RPC_URL env vars, or rely on the defaults below.
  */
 
 import {

@@ -14,14 +14,23 @@ export function parseRateLimitInfo(headers: Headers): RateLimitInfo {
   const limit = parseNumber(headers.get("ratelimit-limit"));
   const remaining = parseNumber(headers.get("ratelimit-remaining"));
 
-  const resetRaw =
-    headers.get("ratelimit-reset") ?? headers.get("retry-after") ?? null;
-  const resetValue = parseNumber(resetRaw);
-
   let resetAt: Date | null = null;
-  if (typeof resetValue === "number") {
-    const ms = resetValue > 1e12 ? resetValue : resetValue * 1000;
-    resetAt = new Date(ms);
+
+  const retryAfterRaw = headers.get("retry-after");
+  const retryAfterSeconds = parseNumber(retryAfterRaw);
+  if (typeof retryAfterSeconds === "number") {
+    resetAt = new Date(Date.now() + retryAfterSeconds * 1000);
+  } else if (retryAfterRaw) {
+    const retryAfterDate = Date.parse(retryAfterRaw);
+    resetAt = Number.isNaN(retryAfterDate) ? null : new Date(retryAfterDate);
+  }
+
+  if (!resetAt) {
+    const resetValue = parseNumber(headers.get("ratelimit-reset"));
+    if (typeof resetValue === "number") {
+      const ms = resetValue > 1e12 ? resetValue : resetValue * 1000;
+      resetAt = new Date(ms);
+    }
   }
 
   return { resetAt, limit, remaining };

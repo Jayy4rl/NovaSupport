@@ -138,28 +138,49 @@ export function ProfileTabs({ username }: { username: string }) {
     };
   }, []);
 
+  // Abort the in-flight request whenever the query changes so a slower earlier
+  // response can never overwrite the results of a newer one (#1064).
   useEffect(() => {
+    const controller = new AbortController();
+    const isStale = () => controller.signal.aborted;
+
     if (activeTab === "history") {
       setLoading(true);
       const params = new URLSearchParams();
       if (debouncedSearch.trim()) params.set("q", debouncedSearch.trim());
       const url = `${API_BASE_URL}/profiles/${username}/transactions${params.toString() ? "?" + params.toString() : ""}`;
-      fetch(url)
+      fetch(url, { signal: controller.signal })
         .then(res => res.json())
         .then(data => {
+          if (isStale()) return;
           setTransactions(data.transactions || []);
         })
-        .catch(err => console.error(err))
-        .finally(() => setLoading(false));
+        .catch(err => {
+          if (err instanceof DOMException && err.name === "AbortError") return;
+          console.error(err);
+        })
+        .finally(() => {
+          if (!isStale()) setLoading(false);
+        });
     }
     if (activeTab === "badges") {
       setBadgesLoading(true);
-      fetch(`${API_BASE_URL}/profiles/${username}/badges`)
+      fetch(`${API_BASE_URL}/profiles/${username}/badges`, { signal: controller.signal })
         .then(res => res.json())
-        .then(data => setBadges(data.badges || []))
-        .catch(err => console.error(err))
-        .finally(() => setBadgesLoading(false));
+        .then(data => {
+          if (isStale()) return;
+          setBadges(data.badges || []);
+        })
+        .catch(err => {
+          if (err instanceof DOMException && err.name === "AbortError") return;
+          console.error(err);
+        })
+        .finally(() => {
+          if (!isStale()) setBadgesLoading(false);
+        });
     }
+
+    return () => controller.abort();
   }, [username, activeTab, debouncedSearch]);
 
   // ── Filtered transactions (date only; search handled by API) ──────────────
@@ -169,7 +190,7 @@ export function ProfileTabs({ username }: { username: string }) {
     const { from, to } = preset === "custom"
       ? {
           from: customFrom ? new Date(customFrom) : null,
-          to:   customTo   ? new Date(customTo)   : null,
+          to: customTo ? new Date(customTo + "T23:59:59.999Z") : null,
         }
       : getPresetRange(preset);
 
@@ -408,17 +429,13 @@ export function ProfileTabs({ username }: { username: string }) {
                       </>
                     )
                   ) : (
-                    <>
-                      <p className="text-gray-500 font-medium">No support yet</p>
-                      <p className="text-sm text-gray-400 mt-1">Be the first to support {username}!</p>
-                    </>
+                    <EmptyState
+                      variant="no-transactions"
+                      title="No transactions yet"
+                      description="Be the first to support this creator!"
+                    />
                   )}
                 </div>
-                <EmptyState
-                  variant="no-transactions"
-                  title="No transactions yet"
-                  description="Be the first to support this creator!"
-                />
               </>
             )}
           </motion.div>
@@ -459,11 +476,6 @@ export function ProfileTabs({ username }: { username: string }) {
                 <p className="text-sm mt-1">Achievement badges will appear here once earned.</p>
               </div>
             )}
-            <EmptyState
-              variant="default"
-              title="Badges coming soon"
-              description="Achievement badges will appear here once earned. Start supporting creators to be eligible!"
-            />
           </motion.div>
         )}
       </AnimatePresence>

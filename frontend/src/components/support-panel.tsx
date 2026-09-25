@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, KeyboardEvent } from "react";
+import { useEffect, useMemo, useState, useCallback, KeyboardEvent } from "react";
 import { useToast } from "@/lib/use-toast";
 import {
   Asset as StellarAsset,
@@ -36,7 +36,64 @@ type Asset = {
 };
 
 const FEE_IN_XLM = Number(BASE_FEE) / 10_000_000;
+
+/**
+ * True when a Horizon balance line matches one of the creator's accepted
+ * assets. Native XLM never has an issuer, so an accepted XLM without an
+ * issuer matches any native balance. For non-native assets an explicit
+ * issuer is required — a missing issuer no longer acts as a wildcard.
+ */
+function isAcceptedBalance(balance: any, acceptedAssets: Asset[]): boolean {
+  return acceptedAssets.some((asset) => {
+    if (balance.asset_type === "native") {
+      return asset.code === "XLM" && !asset.issuer;
+    }
+    return (
+      asset.code === balance.asset_code &&
+      !!asset.issuer &&
+      asset.issuer === balance.asset_issuer
+    );
+  });
+}
+
+function balanceKey(balance: any): string {
+  return balance.asset_type === "native"
+    ? "native"
+    : `${balance.asset_code}:${balance.asset_issuer}`;
+}
 const IS_TESTNET = STELLAR_NETWORK !== "PUBLIC";
+
+/**
+ * Truncates a string so its UTF-8 byte representation is at most
+ * STELLAR_MEMO_BYTE_LIMIT bytes (Stellar's hard limit for TEXT memos).
+ * Plain `.slice(0, 28)` counts UTF-16 code units, not bytes, so multibyte
+ * characters (emoji, non-Latin scripts) can still exceed the limit after
+ * that "truncation". We encode to UTF-8 via TextEncoder, slice the byte
+ * array, then decode — being careful not to cut in the middle of a
+ * multibyte sequence by shortening until the decode round-trips cleanly.
+ */
+const STELLAR_MEMO_BYTE_LIMIT = 28;
+function truncateMemoToStellarLimit(input: string): string {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  let bytes = encoder.encode(input);
+  if (bytes.length <= STELLAR_MEMO_BYTE_LIMIT) return input;
+  bytes = bytes.slice(0, STELLAR_MEMO_BYTE_LIMIT);
+  // Walk back until the slice is valid UTF-8 (no broken multibyte tail).
+  while (bytes.length > 0) {
+    const decoded = decoder.decode(bytes);
+    // Check if the decoded string contains the replacement character (U+FFFD)
+    // that wasn't in the original input — if so, we've cut in the middle of
+    // a multibyte sequence and must back off further.
+    if (decoded.includes("�") && !input.includes("�")) {
+      bytes = bytes.slice(0, bytes.length - 1);
+      continue;
+    }
+    if (encoder.encode(decoded).length === bytes.length) return decoded;
+    bytes = bytes.slice(0, bytes.length - 1);
+  }
+  return "";
+}
 
 type SupportPanelProps = {
   walletAddress: string;
@@ -108,10 +165,21 @@ export function SupportPanel({
     [handleCopy],
   );
 
+  const isXlmPayment = paymentAsset.code === "XLM";
+
   const handleSend = useCallback(async () => {
     const parsedAmt = parseFloat(amount);
     const validAmount = !isNaN(parsedAmt) && parsedAmt > 0;
-    const parsedBal = balance ? parseFloat(balance) : 0;
+    const selectedBalStr = isXlmPayment
+      ? (visitorBalances.find((b: any) => b.asset_type === "native")
+          ?.balance ?? balance)
+      : visitorBalances.find(
+          (b: any) =>
+            b.asset_type !== "native" &&
+            b.asset_code === paymentAsset.code &&
+            (!paymentAsset.issuer || b.asset_issuer === paymentAsset.issuer),
+        )?.balance;
+    const parsedBal = selectedBalStr ? parseFloat(selectedBalStr) : 0;
     const overBalance = isXlmPayment
       ? validAmount && parsedAmt + FEE_IN_XLM > parsedBal
       : validAmount && parsedAmt > parsedBal;
@@ -178,7 +246,7 @@ export function SupportPanel({
       setMessage("");
 
       if (isRecurring && profileId) {
-        await apiFetch(`${API_BASE_URL}/api/v1/recurring-support`, {
+        const recurringRes = await apiFetch(`${API_BASE_URL}/v1/recurring-support`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -188,9 +256,19 @@ export function SupportPanel({
             assetIssuer: paymentAsset.issuer || undefined,
             frequency,
           }),
-        }).catch(() => {
-          // Non-critical — recurring registration failure doesn't affect the payment.
         });
+        if (!recurringRes.ok) {
+          const body = (await recurringRes.json().catch(() => ({}))) as Record<
+            string,
+            unknown
+          >;
+          showToast(
+            typeof body.error === "string"
+              ? body.error
+              : "Payment succeeded, but recurring support could not be enabled.",
+            "error",
+          );
+        }
       }
 
       await loadBalance(visitorAddress);
@@ -203,6 +281,7 @@ export function SupportPanel({
     visitorAddress,
     amount,
     balance,
+    visitorBalances,
     sending,
     paymentAsset,
     walletAddress,
@@ -211,6 +290,7 @@ export function SupportPanel({
     profileId,
     frequency,
     showToast,
+    isXlmPayment,
   ]);
 
   const loadBalance = async (address: string) => {
@@ -262,10 +342,51 @@ export function SupportPanel({
     fetchBalances();
   }, [visitorAddress]);
 
+  // Only offer assets the creator has declared as accepted (#1128). When the
+  // creator has not configured any, fall back to the full wallet.
+  const payableBalances = useMemo(
+    () =>
+      acceptedAssets && acceptedAssets.length > 0
+        ? visitorBalances.filter((b: any) => isAcceptedBalance(b, acceptedAssets))
+        : visitorBalances,
+    [visitorBalances, acceptedAssets],
+  );
+
+  // Keep the selected asset within the payable set.
+  useEffect(() => {
+    if (payableBalances.length === 0) return;
+    const selectedKey =
+      paymentAsset.code === "XLM"
+        ? "native"
+        : `${paymentAsset.code}:${paymentAsset.issuer}`;
+    if (payableBalances.some((b: any) => balanceKey(b) === selectedKey)) return;
+    const first = payableBalances[0];
+    setPaymentAsset(
+      first.asset_type === "native"
+        ? { code: "XLM" }
+        : { code: first.asset_code, issuer: first.asset_issuer },
+    );
+  }, [payableBalances, paymentAsset]);
+
   const parsedAmount = parseFloat(amount);
   const hasValidAmount = !isNaN(parsedAmount) && parsedAmount > 0;
-  const parsedBalance = balance ? parseFloat(balance) : 0;
-  const totalNeeded = hasValidAmount ? parsedAmount + FEE_IN_XLM : 0;
+  const selectedBalanceStr = isXlmPayment
+    ? (visitorBalances.find((b: any) => b.asset_type === "native")?.balance ??
+      balance)
+    : visitorBalances.find(
+        (b: any) =>
+          b.asset_type !== "native" &&
+          b.asset_code === paymentAsset.code &&
+          (!paymentAsset.issuer || b.asset_issuer === paymentAsset.issuer),
+      )?.balance;
+  const parsedBalance = selectedBalanceStr
+    ? parseFloat(selectedBalanceStr)
+    : 0;
+  const totalNeeded = hasValidAmount
+    ? isXlmPayment
+      ? parsedAmount + FEE_IN_XLM
+      : parsedAmount
+    : 0;
   const insufficientBalance = hasValidAmount && totalNeeded > parsedBalance;
   const networkLabel = getNetworkLabel();
   const isBalanceLoading = balanceLoading;
@@ -276,10 +397,15 @@ export function SupportPanel({
   const isValidAmount = hasValidAmount;
   const recipientAsset = { code: "XLM" };
 
-  const isXlmPayment = paymentAsset.code === "XLM";
   const xlmBalance = parseFloat(
     visitorBalances.find((b) => b.asset_type === "native")?.balance ?? "0"
   );
+  const paymentAssetAccepted = payableBalances.some(
+    (b: any) =>
+      balanceKey(b) ===
+      (isXlmPayment ? "native" : `${paymentAsset.code}:${paymentAsset.issuer}`),
+  );
+
   const insufficientXlmForFee =
     !isXlmPayment && hasValidAmount && xlmBalance < FEE_IN_XLM;
 
@@ -378,9 +504,13 @@ export function SupportPanel({
           >
             Pay with
           </label>
-          {visitorBalancesLoaded && visitorBalances.length === 0 ? (
+          {visitorBalancesLoaded && payableBalances.length === 0 ? (
             <p className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-sky/60">
-              Your wallet has no supported assets. Fund your wallet to continue.
+              {visitorBalances.length === 0
+                ? "Your wallet has no supported assets. Fund your wallet to continue."
+                : `Your wallet holds none of the assets ${recipientDisplayName} accepts (${acceptedAssets
+                    ?.map((a) => a.code)
+                    .join(", ")}).`}
             </p>
           ) : (
             <select
@@ -403,18 +533,10 @@ export function SupportPanel({
               }}
               className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white focus:border-mint/50 focus:outline-none appearance-none"
             >
-              {visitorBalances.map((b: any) => (
+              {payableBalances.map((b: any) => (
                 <option
-                  key={
-                    b.asset_type === "native"
-                      ? "native"
-                      : `${b.asset_code}:${b.asset_issuer}`
-                  }
-                  value={
-                    b.asset_type === "native"
-                      ? "native"
-                      : `${b.asset_code}:${b.asset_issuer}`
-                  }
+                  key={balanceKey(b)}
+                  value={balanceKey(b)}
                   className="bg-ink text-white"
                 >
                   {b.asset_type === "native" ? "XLM" : b.asset_code} (
@@ -525,15 +647,15 @@ export function SupportPanel({
             Leave a message (optional)
           </label>
           <span
-            className={`text-[10px] font-medium ${message.length >= 28 ? "text-red-400" : "text-sky/40"}`}
+            className={`text-[10px] font-medium ${new TextEncoder().encode(message).length >= 28 ? "text-red-400" : "text-sky/40"}`}
           >
-            {message.length} / 28
+            {new TextEncoder().encode(message).length} / 28
           </span>
         </div>
         <textarea
           id={messageInputId}
           value={message}
-          onChange={(e) => setMessage(e.target.value.slice(0, 28))}
+          onChange={(e) => setMessage(truncateMemoToStellarLimit(e.target.value))}
           placeholder="e.g. Keep up the great work!"
           rows={2}
           aria-label="Optional message to the creator"
@@ -663,8 +785,12 @@ export function SupportPanel({
       {insufficientBalance && (
         <div className="mt-4 rounded-2xl border border-red-500/20 bg-red-500/5 p-3">
           <p className="text-xs text-red-400">
-            Insufficient balance. You need at least {totalNeeded.toFixed(7)} XLM
-            (including ~{FEE_IN_XLM.toFixed(7)} XLM network fee).
+            Insufficient balance. You need at least {totalNeeded.toFixed(7)}{" "}
+            {paymentAsset.code}
+            {isXlmPayment
+              ? ` (including ~${FEE_IN_XLM.toFixed(7)} XLM network fee)`
+              : ""}
+            .
           </p>
         </div>
       )}
@@ -681,7 +807,7 @@ export function SupportPanel({
       <button
         type="button"
         onClick={handleSend}
-        disabled={!hasValidAmount || insufficientBalance || insufficientXlmForFee || sending}
+        disabled={!hasValidAmount || insufficientBalance || insufficientXlmForFee || !paymentAssetAccepted || sending}
         className="mt-6 w-full rounded-lg bg-mint px-4 py-3 text-sm font-semibold text-black hover:bg-mint/90 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
       >
         {sending ? "Sending…" : "Send Support"}

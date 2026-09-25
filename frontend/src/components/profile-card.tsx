@@ -3,7 +3,7 @@ import { useState, useCallback, KeyboardEvent } from "react";
 import Image from "next/image";
 import { isValidStellarAddress, stellarExpertUrl } from "@/lib/stellar";
 import { useToast } from "@/lib/use-toast";
-import { SITE_URL } from "@/lib/config";
+import { API_BASE_URL, SITE_URL } from "@/lib/config";
 import { apiFetch } from "@/lib/api-client";
 
 import { ProfileCardSkeleton } from "./skeleton";
@@ -64,7 +64,7 @@ export function ProfileCard({
   const handleResend = async () => {
     setResending(true);
     try {
-      const res = await apiFetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000'}/profiles/${username}/resend-verification-email`, {
+      const res = await apiFetch(`${API_BASE_URL}/profiles/${username}/resend-verification-email`, {
         method: "POST",
       });
       const data = await res.json();
@@ -339,7 +339,15 @@ export function ProfileCard({
               className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-sky/80"
             >
               <span className="font-semibold text-white">{asset.code}</span>
-              {asset.issuer ? <span className="ml-2 text-xs">{asset.issuer}</span> : <span className="ml-2 text-xs">native</span>}
+              {asset.issuer ? (
+                <span className="ml-2 text-xs" title={asset.issuer}>
+                  {asset.issuer.length > 10
+                    ? `${asset.issuer.slice(0, 4)}…${asset.issuer.slice(-4)}`
+                    : asset.issuer}
+                </span>
+              ) : (
+                <span className="ml-2 text-xs">native</span>
+              )}
             </div>
           ))}
         </div>

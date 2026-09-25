@@ -241,7 +241,7 @@ export default function ExplorePage() {
                     />
                   ) : (
                     <div className="h-20 w-20 rounded-full bg-gradient-to-br from-mint to-gold mb-4 flex items-center justify-center text-2xl font-bold text-ink">
-                      {profile.displayName[0].toUpperCase()}
+                      {(profile.displayName?.[0] || '?').toUpperCase()}
                     </div>
                   )}
                   <h3 className="text-xl font-semibold text-white mb-1">

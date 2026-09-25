@@ -168,3 +168,10 @@ export function getAvailableWallets(): WalletAdapter[] {
 export function getWalletAdapter(id: WalletId): WalletAdapter | undefined {
   return ALL_ADAPTERS.find((a) => a.id === id);
 }
+
+export function getStoredWalletAddress(): string | null {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") {
+    return null;
+  }
+  return localStorage.getItem("walletAddress");
+}

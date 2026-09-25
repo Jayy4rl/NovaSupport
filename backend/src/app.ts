@@ -1,7 +1,7 @@
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import express, { Response } from "express";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { rateLimit } from "express-rate-limit";
 import { pinoHttp } from "pino-http";
 import type { Logger } from "pino";
@@ -39,7 +39,7 @@ import { processPendingWebhookDeliveries } from "./services/webhook-processor.js
 import { getIsRedisAvailable } from "./services/redis.js";
 import { enqueueWebhookDelivery } from "./services/webhook-queue.js";
 import { addMonths } from "./services/drip-scheduler.js";
-import { sanitizeBody, sanitizeQuery } from "./middleware/sanitize.js";
+import { sanitizeBody, sanitizeQuery, sanitizeString } from "./middleware/sanitize.js";
 import { CircuitBreaker, type CircuitBreakerStorage, type State } from "./services/circuit-breaker.js";
 import {
   validateUsername,
@@ -66,6 +66,21 @@ declare global {
 
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const MAX_FILE_SIZE = 2_097_152;
+
+function getFileSignature(buffer: Buffer): string | null {
+  if (!buffer || buffer.length < 4) return null;
+
+  const hex = buffer.toString("hex", 0, Math.min(12, buffer.length));
+
+  if (hex.startsWith("ffd8ff")) return "image/jpeg";
+  if (hex.startsWith("89504e47")) return "image/png";
+  if (hex.startsWith("52494646") && hex.length >= 24) {
+    const chunk = buffer.toString("ascii", 8, 12);
+    if (chunk === "WEBP") return "image/webp";
+  }
+
+  return null;
+}
 
 const horizonUrl =
   process.env.HORIZON_URL ?? "https://horizon-testnet.stellar.org";
@@ -104,21 +119,34 @@ function createPrismaCircuitBreakerStorage(name: string): CircuitBreakerStorage 
     },
   };
 }
+const rawHorizonFailureThreshold = process.env.HORIZON_CIRCUIT_BREAKER_THRESHOLD
+  ? Number(process.env.HORIZON_CIRCUIT_BREAKER_THRESHOLD)
+  : undefined;
+const horizonFailureThreshold =
+  rawHorizonFailureThreshold !== undefined && Number.isFinite(rawHorizonFailureThreshold)
+    ? rawHorizonFailureThreshold
+    : 5;
+const rawHorizonResetTimeoutMs = process.env.HORIZON_CIRCUIT_BREAKER_RESET_TIMEOUT_MS
+  ? Number(process.env.HORIZON_CIRCUIT_BREAKER_RESET_TIMEOUT_MS)
+  : undefined;
+const horizonResetTimeoutMs =
+  rawHorizonResetTimeoutMs !== undefined && Number.isFinite(rawHorizonResetTimeoutMs)
+    ? rawHorizonResetTimeoutMs
+    : 30000;
 const horizonCircuitBreaker = new CircuitBreaker(
-  5,
-  30000,
+  horizonFailureThreshold,
+  horizonResetTimeoutMs,
   createPrismaCircuitBreakerStorage("horizon"),
-); // 5 failures, 30s reset
+); // defaults: 5 failures, 30s reset — configurable via HORIZON_CIRCUIT_BREAKER_THRESHOLD / HORIZON_CIRCUIT_BREAKER_RESET_TIMEOUT_MS
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_FILE_SIZE },
   fileFilter: (_req, file, cb) => {
-    if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new multer.MulterError("LIMIT_UNEXPECTED_FILE", file.fieldname));
+    if (!ALLOWED_MIME_TYPES.has(file.mimetype)) {
+      return cb(new multer.MulterError("LIMIT_UNEXPECTED_FILE", file.fieldname));
     }
+    cb(null, true);
   },
 });
 
@@ -265,6 +293,7 @@ function createRateLimiters() {
     standardHeaders: true,
     legacyHeaders: false,
     skip: () => process.env.NODE_ENV === "test",
+    keyGenerator: (req: any) => `${req.ip}-${req.params.username}`,
     message: { error: "Too many requests, please try again later." },
   });
 
@@ -298,9 +327,23 @@ function createRateLimiters() {
     message: { error: "Too many requests, please try again later." },
   });
 
+  // CSV export scans up to 10,000 rows per request: 5 per 15 minutes per client (#1198)
+  const exportLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: () => process.env.NODE_ENV === "test",
+    message: {
+      error: "Too many export requests, please try again later.",
+      code: "RATE_LIMIT_EXCEEDED",
+    },
+  });
+
   return {
     globalLimiter,
     writeLimiter,
+    exportLimiter,
     profileCreationLimiter,
     resendLimiter,
     viewCountLimiter,
@@ -357,7 +400,14 @@ function escapeCsvCell(value: unknown): string {
   }
 
   const text = value instanceof Date ? value.toISOString() : String(value);
-  return `"${text.replace(/"/g, '""')}"`;
+  const escaped = text.replace(/"/g, '""');
+
+  // Escape formula-starting characters: =, +, -, @, tab, CR
+  if (/^[=+\-@\t\r]/.test(escaped)) {
+    return `"'${escaped}"`;
+  }
+
+  return `"${escaped}"`;
 }
 
 function toCsv(rows: unknown[][]): string {
@@ -395,8 +445,15 @@ function createAnalyticsCsv(transactions: any[]): string {
 export function createApp(customLogger?: Logger) {
   const app = express();
   const {
+
+  // Issue #1259: Configure trust-proxy so req.ip reflects the real client address
+  // behind reverse proxies/load balancers, not the proxy's own IP.
+  // This is required for all IP-based rate limiting and abuse detection to work correctly.
+  app.set("trust proxy", true);
+
     globalLimiter,
     writeLimiter,
+    exportLimiter,
     profileCreationLimiter,
     resendLimiter,
     viewCountLimiter,
@@ -497,63 +554,6 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     apis: ["./src/app.ts"],
   });
 
-  app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
-  app.get("/docs.json", (req, res) => {
-    const dynamicSpec = {
-      ...swaggerSpec,
-      servers: [
-        {
-          url: process.env.BACKEND_URL
-            ? process.env.BACKEND_URL.replace(/\/$/, "")
-            : `${req.protocol}://${req.get("host")}/api/v1`
-        }
-      ]
-    };
-    res.json(dynamicSpec);
-  });
-
-  // ── Stellar TOML (#514) ───────────────────────────────────────────────
-  // Must be registered before any other middleware that might intercept it.
-  // Required by Stellar wallets and federation resolvers.
-  // Spec: https://developers.stellar.org/docs/learn/encyclopedia/network-configuration/stellar-toml
-  let tomlCache: { body: string; expiresAt: number } | null = null;
-
-  app.get("/.well-known/stellar.toml", federationLimiter, async (_req, res) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Cache-Control", "public, max-age=60");
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-
-    const now = Date.now();
-    if (tomlCache && now < tomlCache.expiresAt) {
-      return res.send(tomlCache.body);
-    }
-
-    try {
-      const profiles = await prisma.profile.findMany({
-        select: { walletAddress: true },
-        take: 10_000,
-      });
-
-      const accountLines = profiles
-        .map((p) => `[[ACCOUNTS]]\naddress = "${p.walletAddress}"`)
-        .join("\n\n");
-
-      const body = [
-        `NETWORK_PASSPHRASE="${process.env.STELLAR_NETWORK === 'PUBLIC'
-          ? 'Public Global Stellar Network ; September 2015'
-          : 'Test SDF Network ; September 2015'}"`,
-        `FEDERATION_SERVER="https://api.novasupport.xyz/federation"`,
-        ``,
-        accountLines || `# no accounts yet`,
-      ].join("\n");
-
-      tomlCache = { body, expiresAt: now + 60_000 };
-      return res.send(body);
-    } catch {
-      return res.status(500).send("# Internal server error");
-    }
-  });
-
   const CHALLENGE_EXPIRY_MS = 5 * 60 * 1000; // 5 minutes
 
   const allowedOrigins = (
@@ -626,6 +626,63 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     app.use(Sentry.expressErrorHandler());
   }
   app.use(globalLimiter);
+
+  // ── Swagger docs (#1192: registered after global middleware) ──────────
+  app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+  app.get("/docs.json", (req, res) => {
+    const dynamicSpec = {
+      ...swaggerSpec,
+      servers: [
+        {
+          url: process.env.BACKEND_URL
+            ? process.env.BACKEND_URL.replace(/\/$/, "")
+            : `${req.protocol}://${req.get("host")}/api/v1`
+        }
+      ]
+    };
+    res.json(dynamicSpec);
+  });
+
+  // ── Stellar TOML (#514, #1192: registered after global middleware) ────
+  // Required by Stellar wallets and federation resolvers.
+  // Spec: https://developers.stellar.org/docs/learn/encyclopedia/network-configuration/stellar-toml
+  let tomlCache: { body: string; expiresAt: number } | null = null;
+
+  app.get("/.well-known/stellar.toml", federationLimiter, async (_req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cache-Control", "public, max-age=60");
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+
+    const now = Date.now();
+    if (tomlCache && now < tomlCache.expiresAt) {
+      return res.send(tomlCache.body);
+    }
+
+    try {
+      const profiles = await prisma.profile.findMany({
+        select: { walletAddress: true },
+        take: 10_000,
+      });
+
+      const accountLines = profiles
+        .map((p) => `[[ACCOUNTS]]\naddress = "${p.walletAddress}"`)
+        .join("\n\n");
+
+      const body = [
+        `NETWORK_PASSPHRASE="${process.env.STELLAR_NETWORK === 'PUBLIC'
+          ? 'Public Global Stellar Network ; September 2015'
+          : 'Test SDF Network ; September 2015'}"`,
+        `FEDERATION_SERVER="https://api.novasupport.xyz/federation"`,
+        ``,
+        accountLines || `# no accounts yet`,
+      ].join("\n");
+
+      tomlCache = { body, expiresAt: now + 60_000 };
+      return res.send(body);
+    } catch {
+      return res.status(500).send("# Internal server error");
+    }
+  });
 
   // ── API-Version header on every response ──────────────────────────────
   app.use((_req, res, next) => {
@@ -840,62 +897,85 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       return sendError(res, 400, "Invalid wallet address");
     }
 
-    const challengeRow = await prisma.authChallenge.findUnique({
-      where: { walletAddress },
-    });
-    if (!challengeRow) {
-      return sendError(res, 400, "No challenge found for this wallet");
-    }
-
-    // Check if challenge expired
-    if (challengeRow.expiresAt < new Date()) {
-      await prisma.authChallenge.delete({ where: { walletAddress } });
-      return sendError(res, 400, "Challenge expired");
-    }
-
-    // Verify the signature
-    const isValid = verifySignature(
-      walletAddress,
-      challengeRow.challenge,
-      signature,
-    );
-    if (!isValid) {
-      return sendError(res, 401, "Invalid signature");
-    }
-
-    // Clear the used challenge
-    await prisma.authChallenge.delete({ where: { walletAddress } });
-
-    // Create or get user
-    let user = await prisma.user.findFirst({
-      where: { email: walletAddress },
-    });
-
-    if (!user) {
-      user = await prisma.user.create({
-        data: { email: walletAddress },
+    try {
+      const challengeRow = await prisma.authChallenge.findUnique({
+        where: { walletAddress },
       });
+      if (!challengeRow) {
+        return sendError(res, 400, "No challenge found for this wallet");
+      }
+
+      // Check if challenge expired
+      if (challengeRow.expiresAt < new Date()) {
+        await prisma.authChallenge.delete({ where: { walletAddress } });
+        return sendError(res, 400, "Challenge expired");
+      }
+
+      // Verify the signature
+      const isValid = verifySignature(
+        walletAddress,
+        challengeRow.challenge,
+        signature,
+      );
+      if (!isValid) {
+        return sendError(res, 401, "Invalid signature");
+      }
+
+      // Clear the used challenge
+      await prisma.authChallenge.delete({ where: { walletAddress } });
+
+      // Create or get user
+      let user = await prisma.user.findFirst({
+        where: { email: walletAddress },
+      });
+
+      if (!user) {
+        user = await prisma.user.create({
+          data: { email: walletAddress },
+        });
+      }
+
+      // Sign JWT
+      const token = signJWT(walletAddress, user.id);
+
+      // Attach wallet address as Sentry user context for session breadcrumbs
+      if (process.env.SENTRY_DSN) {
+        Sentry.setUser({ id: user.id, username: walletAddress });
+      }
+
+      // #759: Set httpOnly cookie so the browser sends it automatically.
+      // The token is still returned in the JSON body for API / mobile consumers
+      // that cannot access httpOnly cookies.
+      res.cookie("auth_token", token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        maxAge: 60 * 60 * 1000, // 1 hour — matches JWT_EXPIRY
+      });
+
+      res.json({ token, walletAddress, userId: user.id });
+    } catch (error) {
+      // #974: two concurrent /auth/verify calls for the same wallet can both
+      // read the same challenge row before either deletes it — the loser's
+      // delete throws P2025, or its user.create() throws P2002 on the email
+      // unique constraint. Both mean the other request already completed
+      // the verification, so the client can just retry.
+      if (
+        error &&
+        typeof error === "object" &&
+        "code" in error &&
+        (error.code === "P2025" || error.code === "P2002")
+      ) {
+        return sendError(
+          res,
+          409,
+          "Verification already in progress for this wallet, please retry",
+          "VERIFY_RACE",
+        );
+      }
+      req.log.error({ err: error }, "Error verifying auth challenge");
+      return sendError(res, 500, "Internal server error");
     }
-
-    // Sign JWT
-    const token = signJWT(walletAddress, user.id);
-
-    // Attach wallet address as Sentry user context for session breadcrumbs
-    if (process.env.SENTRY_DSN) {
-      Sentry.setUser({ id: user.id, username: walletAddress });
-    }
-
-    // #759: Set httpOnly cookie so the browser sends it automatically.
-    // The token is still returned in the JSON body for API / mobile consumers
-    // that cannot access httpOnly cookies.
-    res.cookie("auth_token", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: 60 * 60 * 1000, // 1 hour — matches JWT_EXPIRY
-    });
-
-    res.json({ token, walletAddress, userId: user.id });
   });
 
   /**
@@ -928,6 +1008,39 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       res.json({ ok: true });
     } catch (e: unknown) {
       req.log.error({ err: e }, "database error during logout");
+      return sendError(res, 500, "Internal server error");
+    }
+  });
+
+  v1Router.get("/auth/me", requireAuth, async (req, res) => {
+    try {
+      const profile = await prisma.profile.findFirst({
+        where: {
+          OR: [
+            { ownerId: req.auth?.userId },
+            { walletAddress: req.auth?.walletAddress },
+          ],
+        },
+        select: {
+          username: true,
+          displayName: true,
+          walletAddress: true,
+          ownerId: true,
+        },
+      });
+
+      if (!profile) {
+        return sendError(res, 404, "Profile not found for authenticated user");
+      }
+
+      res.json({
+        username: profile.username,
+        displayName: profile.displayName,
+        walletAddress: profile.walletAddress,
+        userId: profile.ownerId,
+      });
+    } catch (e: unknown) {
+      req.log.error({ err: e }, "database error fetching current user");
       return sendError(res, 500, "Internal server error");
     }
   });
@@ -1042,6 +1155,19 @@ All errors return JSON with an \`error\` field and optional \`code\`:
           }
         : {};
 
+      const assetWhere = asset
+        ? {
+            acceptedAssets: {
+              some: {
+                code: asset,
+                ...(assetIssuer !== "" ? { issuer: assetIssuer } : {}),
+              },
+            },
+          }
+        : {};
+
+      const combinedWhere = { ...where, ...assetWhere };
+
       let orderBy: object = { createdAt: "desc" };
 
       if (sort === "most_supported" || sort === "most_transactions") {
@@ -1052,7 +1178,19 @@ All errors return JSON with an \`error\` field and optional \`code\`:
         const profiles = await prisma.profile.findMany({
           where,
           take: 1000,
-          include: {
+          select: {
+            id: true,
+            username: true,
+            displayName: true,
+            bio: true,
+            avatarUrl: true,
+            websiteUrl: true,
+            twitterHandle: true,
+            githubHandle: true,
+            walletAddress: true,
+            viewCount: true,
+            createdAt: true,
+            updatedAt: true,
             acceptedAssets: true,
             supportTransactions: {
               where: { status: "SUCCESS" },
@@ -1097,9 +1235,14 @@ All errors return JSON with an \`error\` field and optional \`code\`:
           return profile;
         });
 
+        // The in-memory list is capped at 1000 rows, so its length is not the
+        // true match count. Use a database count so `total` means the same
+        // thing for every sort mode (#1196).
+        const total = await prisma.profile.count({ where: combinedWhere });
+
         return res.json({
           profiles: result,
-          total: filtered.length,
+          total,
           limit,
           offset,
         });
@@ -1109,26 +1252,27 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       // When an asset filter is supplied, push it into the DB query so that
       // `total` reflects the actual matched count rather than the page-slice
       // size returned by an in-memory filter (#602).
-      const assetWhere = asset
-        ? {
-            acceptedAssets: {
-              some: {
-                code: asset,
-                ...(assetIssuer !== "" ? { issuer: assetIssuer } : {}),
-              },
-            },
-          }
-        : {};
-
-      const combinedWhere = { ...where, ...assetWhere };
-
       const [profiles, total] = await Promise.all([
         prisma.profile.findMany({
           where: combinedWhere,
           take: limit,
           skip: offset,
           orderBy,
-          include: { acceptedAssets: true },
+          select: {
+            id: true,
+            username: true,
+            displayName: true,
+            bio: true,
+            avatarUrl: true,
+            websiteUrl: true,
+            twitterHandle: true,
+            githubHandle: true,
+            walletAddress: true,
+            viewCount: true,
+            createdAt: true,
+            updatedAt: true,
+            acceptedAssets: true,
+          },
         }),
         prisma.profile.count({ where: combinedWhere }),
       ]);
@@ -1248,6 +1392,14 @@ All errors return JSON with an \`error\` field and optional \`code\`:
         res,
         400,
         "Query parameter 'q' is required and cannot be empty",
+      );
+    }
+
+    if (q.length > 100) {
+      return sendError(
+        res,
+        400,
+        "Query parameter 'q' must not exceed 100 characters",
       );
     }
 
@@ -1414,11 +1566,24 @@ All errors return JSON with an \`error\` field and optional \`code\`:
    */
   // #463 — view count: increment once per IP per hour via viewCountLimiter
 //   app.get("/profiles/:username", async (req, res) => {
-  v1Router.get("/profiles/:username", optionalAuth, async (req, res) => {
+  v1Router.get("/profiles/:username", optionalAuth, viewCountLimiter, async (req, res) => {
     try {
       const profile = await prisma.profile.findUnique({
         where: { username: req.params.username as string },
-        include: {
+        select: {
+          id: true,
+          username: true,
+          displayName: true,
+          bio: true,
+          avatarUrl: true,
+          websiteUrl: true,
+          twitterHandle: true,
+          githubHandle: true,
+          walletAddress: true,
+          ownerId: true,
+          viewCount: true,
+          createdAt: true,
+          updatedAt: true,
           acceptedAssets: true,
         },
       });
@@ -1440,11 +1605,10 @@ All errors return JSON with an \`error\` field and optional \`code\`:
         });
       }
 
-      const responseBody: Record<string, unknown> = { ...profile };
+      const { ownerId: _, ...publicProfile } = profile;
+      const responseBody: Record<string, unknown> = { ...publicProfile };
       if (req.auth) {
-        responseBody.isOwner = Boolean(
-          isProfileOwner(req.auth, profile),
-        );
+        responseBody.isOwner = isOwner;
       }
 
       res.json(responseBody);
@@ -1453,9 +1617,6 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       return sendError(res, 500, "Internal server error");
     }
   });
-
-  // Apply per-IP view count limiter (rate-limits the increment, not the read)
-  app.use("/profiles/:username", viewCountLimiter);
 
 //   app.get("/profiles/:username/stats", async (req, res) => {
   v1Router.get("/profiles/:username/stats", async (req, res) => {
@@ -1493,7 +1654,7 @@ All errors return JSON with an \`error\` field and optional \`code\`:
 
       const totalTransactions = assetGroups.reduce((acc: number, g: any) => acc + g._count, 0);
 
-      const totalByAsset = assetGroups.map((g: any) => ({
+      const assetTotals = assetGroups.map((g: any) => ({
         assetCode: g.assetCode,
         assetIssuer: g.assetIssuer,
         total: g._sum.amount ? g._sum.amount.toFixed(7) : "0.0000000",
@@ -1502,7 +1663,7 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       res.json({
         totalTransactions,
         uniqueSupporters: uniqueSupportersList.length,
-        totalByAsset,
+        assetTotals,
         firstSupportedAt: aggregates._min.createdAt ? aggregates._min.createdAt.toISOString() : null,
         lastSupportedAt: aggregates._max.createdAt ? aggregates._max.createdAt.toISOString() : null,
       });
@@ -1801,7 +1962,6 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     bio: z.string().max(280).optional(),
     avatarUrl: z.string().url().optional().nullable(),
     email: z.string().email().optional().nullable(),
-    notifyOnSupport: z.boolean().optional(),
     websiteUrl: z.string().url().startsWith("https://").optional().nullable(),
     twitterHandle: z
       .string()
@@ -2097,6 +2257,21 @@ All errors return JSON with an \`error\` field and optional \`code\`:
           await import("./services/profile-importer.js");
         ghData = mapGitHubToNovaSupport(await fetchGitHubProfile(githubUsername, githubToken));
 
+        // GitHub-sourced fields never pass through req.body, so the global
+        // sanitizeBody middleware never runs on them — sanitize explicitly here
+        // using the same helper to avoid a stored-XSS bypass.
+        ghData.displayName = sanitizeString("displayName", ghData.displayName).result;
+        ghData.bio = sanitizeString("bio", ghData.bio).result;
+        if (ghData.websiteUrl) {
+          ghData.websiteUrl = sanitizeString("websiteUrl", ghData.websiteUrl).result || null;
+        }
+        if (ghData.twitterHandle) {
+          ghData.twitterHandle = sanitizeString("twitterHandle", ghData.twitterHandle).result || null;
+        }
+        if (ghData.avatarUrl) {
+          ghData.avatarUrl = sanitizeString("avatarUrl", ghData.avatarUrl).result || null;
+        }
+
         const updated = await prisma.profile.update({
           where: { username },
           data: {
@@ -2305,7 +2480,8 @@ All errors return JSON with an \`error\` field and optional \`code\`:
             { message: "issuer is required for non-XLM assets" },
           ),
       )
-      .min(1),
+      .min(1)
+      .max(50),
   });
 
   /**
@@ -2378,6 +2554,20 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       }
 
       try {
+        // Deduplicate assets by (code, issuer) before insert
+        const seen = new Set<string>();
+        const duplicates: string[] = [];
+        for (const asset of parsed.data.assets) {
+          const key = `${asset.code}:${asset.issuer ?? ""}`;
+          if (seen.has(key)) {
+            duplicates.push(`${asset.code}${asset.issuer ? ` (issuer ${asset.issuer})` : ""}`);
+          }
+          seen.add(key);
+        }
+        if (duplicates.length > 0) {
+          return sendError(res, 422, `Duplicate assets: ${duplicates.join(", ")}`);
+        }
+
         await prisma.$transaction([
           prisma.acceptedAsset.deleteMany({ where: { profileId: profile.id } }),
           prisma.acceptedAsset.createMany({
@@ -2408,7 +2598,7 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     amount: z.string()
       .regex(/^\d+(\.\d{1,7})?$/, "amount must be a positive decimal with up to 7 decimal places")
       .refine(v => parseFloat(v) > 0, "amount must be greater than zero"),
-    assetCode: z.string().min(1),
+    assetCode: z.string().min(1).max(12),
     assetIssuer: z.string().optional().nullable(),
     status: z.enum(["pending", "SUCCESS", "failed"]).default("pending"),
     message: z.string().max(280).optional().nullable(),
@@ -2685,7 +2875,7 @@ All errors return JSON with an \`error\` field and optional \`code\`:
    *       500:
    *         description: Internal server error
    */
-  v1Router.get(["/profiles/:username/transactions/export", "/profiles/:username/transactions/csv"], requireAuth, async (req, res) => {
+  v1Router.get(["/profiles/:username/transactions/export", "/profiles/:username/transactions/csv"], requireAuth, exportLimiter, async (req, res) => {
     const username = req.params.username as string;
     const { startDate, endDate, taxYear } = req.query;
 
@@ -2822,29 +3012,50 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     return profile;
   }
 
-  v1Router.post("/profiles/:username/webhooks", requireAuth, async (req, res) => {
-    const parsed = webhookCreateSchema.safeParse(req.body);
-    if (!parsed.success) return sendError(res, 400, "Invalid URL — must be a valid HTTPS URL");
+  v1Router.post("/profiles/:username/webhooks", requireAuth, writeLimiter, async (req, res) => {
+    try {
+      const parsed = webhookCreateSchema.safeParse(req.body);
+      if (!parsed.success) return sendError(res, 400, "Invalid URL — must be a valid HTTPS URL");
 
     const ssrfError = await validateWebhookUrl(parsed.data.url);
     if (ssrfError) return sendError(res, 400, ssrfError);
 
     const profile = await resolveProfileOwner(req.params.username as string, req.auth, res);
     if (!profile) return;
+      const profile = await resolveProfileOwner(req.params.username as string, req.auth, res);
+      if (!profile) return;
 
-    const existingCount = await prisma.webhook.count({
-      where: { profileId: profile.id },
-    });
-    if (existingCount >= 10) {
-      return sendError(res, 422, "Maximum 10 webhooks per profile");
+      const result = await prisma.$transaction(
+        async (tx) => {
+          const existingCount = await tx.webhook.count({
+            where: { profileId: profile.id },
+          });
+          if (existingCount >= 10) {
+            throw new Error("MAX_WEBHOOKS_EXCEEDED");
+          }
+
+          const secret = randomBytes(32).toString("hex");
+          const secretHashValue = createHash("sha256").update(secret).digest("hex");
+          const webhook = await tx.webhook.create({
+            data: { url: parsed.data.url, secretHash: secretHashValue, signingKey: secret, profileId: profile.id },
+          });
+          return { webhook, secret };
+        },
+        { isolationLevel: "Serializable" },
+      );
+
+      return res.status(201).json({ id: result.webhook.id, url: result.webhook.url, secret: result.secret });
+    } catch (err) {
+      if (err instanceof Error && err.message === "MAX_WEBHOOKS_EXCEEDED") {
+        return sendError(res, 422, "Maximum 10 webhooks per profile");
+      }
+      if (err && typeof err === "object" && "code" in err && err.code === "P2034") {
+        req.log.warn({ err }, "retryable webhook creation serialization conflict");
+        return sendError(res, 409, "Webhook creation conflicted; please retry", "RETRYABLE_WRITE_CONFLICT");
+      }
+      req.log.error({ err }, "database error creating webhook");
+      return sendError(res, 500, "Internal server error");
     }
-
-    const secret = randomBytes(32).toString("hex");
-    const webhook = await prisma.webhook.create({
-      data: { url: parsed.data.url, secretHash: secret, profileId: profile.id },
-    });
-
-    return res.status(201).json({ id: webhook.id, url: webhook.url, secret });
   });
 
   v1Router.get("/profiles/:username/webhooks", requireAuth, async (req, res) => {
@@ -2859,7 +3070,7 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     return res.json(webhooks);
   });
 
-  v1Router.delete("/profiles/:username/webhooks/:id", requireAuth, async (req, res) => {
+  v1Router.delete("/profiles/:username/webhooks/:id", requireAuth, writeLimiter, async (req, res) => {
     const profile = await resolveProfileOwner(req.params.username as string, req.auth, res);
     if (!profile) return;
 
@@ -3266,7 +3477,10 @@ All errors return JSON with an \`error\` field and optional \`code\`:
               if (updated.currentAmount.greaterThanOrEqualTo(updated.targetAmount)) {
                 await tx.milestone.update({
                   where: { id: milestone.id },
-                  data: { status: "reached" },
+                  data: {
+                    status: "reached",
+                    reachedAt: milestone.reachedAt ?? new Date(),
+                  },
                 });
               }
             }
@@ -3277,18 +3491,39 @@ All errors return JSON with an \`error\` field and optional \`code\`:
         void invalidateProfileLeaderboardCache(supportRecord.profileId);
       } catch (error: any) {
         if (error?.code === "P2002") {
-          const existing = await prisma.supportTransaction.findUnique({
-            where: { txHash: parsed.data.txHash },
-            select: { txHash: true },
-          });
+          // Inspect meta.target to determine which unique constraint was
+          // actually violated. SupportTransaction has two independent unique
+          // constraints — txHash and recurringSupportExecutionId — and
+          // always looking up by txHash when the real conflict is on
+          // recurringSupportExecutionId would return nothing, causing the 409
+          // to report a txHash that was never stored.
+          const target: string[] = error?.meta?.target ?? [];
+          let existingTxHash: string | null = null;
+
+          if (target.includes("recurringSupportExecutionId") && parsed.data.recurringSupportExecutionId) {
+            const existing = await prisma.supportTransaction.findUnique({
+              where: { recurringSupportExecutionId: parsed.data.recurringSupportExecutionId },
+              select: { txHash: true },
+            });
+            existingTxHash = existing?.txHash ?? null;
+          } else {
+            // Default: conflict on txHash (or unknown target — fall back safely).
+            const existing = await prisma.supportTransaction.findUnique({
+              where: { txHash: parsed.data.txHash },
+              select: { txHash: true },
+            });
+            existingTxHash = existing?.txHash ?? parsed.data.txHash;
+          }
 
           return res.status(409).json({
             error: "Transaction already recorded",
             code: "DUPLICATE_TX",
-            existingTxHash: existing?.txHash ?? parsed.data.txHash,
+            existingTxHash,
           });
         }
-        throw error;
+        // Handle other database errors gracefully instead of crashing the process
+        req.log.error({ err: error, txHash: parsed.data.txHash }, "Database error recording support transaction");
+        return sendError(res, 500, "Internal server error");
       }
 
       // Notify creator (async, best-effort) — respects NotificationPreferences
@@ -3300,9 +3535,7 @@ All errors return JSON with an \`error\` field and optional \`code\`:
           });
 
           const notifyOnSupport =
-            recipientProfile?.notificationPreferences?.notifyOnSupport ??
-            recipientProfile?.notifyOnSupport ??
-            true;
+            recipientProfile?.notificationPreferences?.notifyOnSupport ?? true;
 
           // Only send email if profile has verified email (#417)
           if (
@@ -3376,7 +3609,14 @@ All errors return JSON with an \`error\` field and optional \`code\`:
             }
           }
 
-          await processPendingWebhookDeliveries();
+          // The DB-poll fallback is only for when BullMQ isn't available —
+          // when it is, running this unconditionally would let every
+          // support-transaction request independently claim and deliver up
+          // to 50 pending rows outside the worker's rate limiter, defeating
+          // the point of enqueueing above (#975).
+          if (!getIsRedisAvailable()) {
+            await processPendingWebhookDeliveries();
+          }
         } catch (err) {
           logger.error(
             { err, txHash: supportRecord.txHash },
@@ -3585,6 +3825,15 @@ All errors return JSON with an \`error\` field and optional \`code\`:
         return sendError(res, 400, "startDate must be before endDate");
       }
 
+      // Cap the date range to 2 years to prevent the gap-fill loop from
+      // blocking the event loop on arbitrarily wide unauthenticated requests.
+      const MAX_RANGE_MS = 2 * 365 * 24 * 60 * 60 * 1000;
+      const rangeStart = start ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const rangeEnd = end ?? new Date();
+      if (rangeEnd.getTime() - rangeStart.getTime() > MAX_RANGE_MS) {
+        return sendError(res, 400, "Date range must not exceed 2 years");
+      }
+
       if (format === "csv") {
         const MAX_EXPORT_ROWS = 10_000;
         const transactions = await prisma.supportTransaction.findMany({
@@ -3607,12 +3856,29 @@ All errors return JSON with an \`error\` field and optional \`code\`:
         return res.send(createAnalyticsCsv(transactions));
       }
 
-      const analytics = await getAnalytics(profile.id, start, end, "json");
+      const [analytics, recentTransactions] = await Promise.all([
+        getAnalytics(profile.id, start, end, "json"),
+        prisma.supportTransaction.findMany({
+          where: { profileId: profile.id },
+          orderBy: { createdAt: "desc" },
+          take: 10,
+          select: {
+            id: true,
+            txHash: true,
+            amount: true,
+            assetCode: true,
+            supporterAddress: true,
+            createdAt: true,
+            status: true,
+            message: true,
+          },
+        }),
+      ]);
 
       res.json({
         profile: { username: profile.username, displayName: profile.displayName },
         ...analytics,
-        recentTransactions: analytics.dailyContributions, // For backward compatibility or adjustment
+        recentTransactions,
       });
     } catch (err) {
       req.log.error({ err }, "failed to fetch analytics");
@@ -3690,7 +3956,22 @@ All errors return JSON with an \`error\` field and optional \`code\`:
         return sendError(res, 400, "No file attached — include an 'avatar' field in the multipart body");
       }
 
-      const path = `avatars/${username}`;
+      const detectedMimeType = getFileSignature(req.file.buffer);
+      if (!detectedMimeType || !ALLOWED_MIME_TYPES.has(detectedMimeType)) {
+        return sendError(res, 400, "File type validation failed — the uploaded file is not a valid image (JPEG, PNG, or WebP)");
+      }
+
+      // Delete old avatar to prevent orphaned files
+      const listResult = await supabaseClient.storage.from(bucket).list(`avatars/${username}`);
+      if (listResult.data) {
+        const oldPaths = listResult.data.map((f) => `avatars/${username}/${f.name}`);
+        if (oldPaths.length > 0) {
+          await supabaseClient.storage.from(bucket).remove(oldPaths);
+        }
+      }
+
+      const version = Date.now();
+      const path = `avatars/${username}/${version}`;
       const { error: uploadError } = await supabaseClient.storage
         .from(bucket)
         .upload(path, req.file.buffer, { upsert: true });
@@ -3852,17 +4133,47 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     }
 
     try {
-      const result = await prisma.webhookDelivery.updateMany({
-        where: { status: "failed" },
-        data: {
-          status: "pending",
-          attemptCount: 0,
-          nextRetryAt: new Date(),
-        },
-      });
+      const PAGE_SIZE = 100;
+      let totalRequeued = 0;
+      let hasMore = true;
 
-      req.log.info({ count: result.count }, "requeued failed webhooks");
-      return res.json({ count: result.count });
+      while (hasMore) {
+        const failed = await prisma.webhookDelivery.findMany({
+          where: { status: "failed" },
+          select: { id: true },
+          take: PAGE_SIZE,
+        });
+
+        if (failed.length === 0) {
+          hasMore = false;
+          break;
+        }
+
+        const result = await prisma.webhookDelivery.updateMany({
+          where: { id: { in: failed.map((d) => d.id) } },
+          data: {
+            status: "pending",
+            attemptCount: 0,
+            nextRetryAt: new Date(),
+          },
+        });
+
+        totalRequeued += result.count;
+
+        const promises = failed.map((delivery) =>
+          enqueueWebhookDelivery(delivery.id).catch((err) => {
+            req.log.warn({ deliveryId: delivery.id, err }, "Failed to enqueue requeued webhook");
+          }),
+        );
+        await Promise.all(promises);
+
+        if (failed.length < PAGE_SIZE) {
+          hasMore = false;
+        }
+      }
+
+      req.log.info({ count: totalRequeued }, "requeued failed webhooks");
+      return res.json({ count: totalRequeued });
     } catch (e: unknown) {
       req.log.error({ err: e }, "database error requeuing webhooks");
       return sendError(res, 500, "Internal server error");
@@ -3915,13 +4226,14 @@ All errors return JSON with an \`error\` field and optional \`code\`:
   // ── Milestones ─────────────────────────────────────────────────────────
 
   const createMilestoneSchema = z.object({
-    title: z.string().min(1).max(100),
+    title: z.string().trim().min(1).max(100),
     description: z.string().max(500).optional().nullable(),
     targetAmount: z
       .string()
       .regex(/^\d+(\.\d{1,7})?$/, "Must be a positive decimal with up to 7 places")
       .refine((v) => parseFloat(v) > 0, "Must be greater than zero"),
     assetCode: z.string().default("XLM"),
+    assetIssuer: z.string().optional().nullable(),
   });
 
   v1Router.post("/profiles/:username/milestones", requireAuth, writeLimiter, async (req, res) => {
@@ -3929,6 +4241,7 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       const username = req.params.username as string;
       const profile = await prisma.profile.findUnique({
         where: { username },
+        include: { acceptedAssets: true },
       });
 
       if (!profile) {
@@ -3940,30 +4253,55 @@ All errors return JSON with an \`error\` field and optional \`code\`:
         return sendError(res, 403, "Forbidden: You do not own this profile");
       }
 
-      const activeCount = await prisma.milestone.count({
-        where: { profileId: profile.id, status: { not: "reached" } },
-      });
-      if (activeCount >= 20) {
-        return sendError(res, 422, "Maximum 20 active milestones per profile");
-      }
-
       const parsed = createMilestoneSchema.safeParse(req.body);
       if (!parsed.success) {
         return sendError(res, 400, "Invalid request body");
       }
 
-      const milestone = await prisma.milestone.create({
-        data: {
-          title: parsed.data.title,
-          description: parsed.data.description,
-          targetAmount: parsed.data.targetAmount,
-          assetCode: parsed.data.assetCode,
-          profileId: profile.id,
+      const { assetCode, assetIssuer } = parsed.data;
+      const acceptedCodes = profile.acceptedAssets.map((a: { code: string }) => a.code);
+      if (acceptedCodes.length > 0 && !isAcceptedAssetPair(profile.acceptedAssets, assetCode, assetIssuer ?? null)) {
+        return sendError(
+          res,
+          400,
+          `Asset '${assetCode}'${assetIssuer ? ` (issuer ${assetIssuer})` : ""} is not accepted by this profile. Accepted: ${acceptedCodes.join(", ")}`,
+        );
+      }
+
+      const milestone = await prisma.$transaction(
+        async (tx) => {
+          const activeCount = await tx.milestone.count({
+            where: { profileId: profile.id, status: { not: "reached" } },
+          });
+          if (activeCount >= 20) {
+            throw new Error("MAX_MILESTONES_EXCEEDED");
+          }
+
+          const created = await tx.milestone.create({
+            data: {
+              title: parsed.data.title,
+              description: parsed.data.description,
+              targetAmount: parsed.data.targetAmount,
+              assetCode: parsed.data.assetCode,
+              assetIssuer: parsed.data.assetIssuer ?? null,
+              profileId: profile.id,
+            },
+          });
+          return created;
         },
-      });
+        { isolationLevel: "Serializable" },
+      );
 
       res.status(201).json(milestone);
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && err.message === "MAX_MILESTONES_EXCEEDED") {
+        return sendError(res, 422, "Maximum 20 active milestones per profile");
+      }
+      if (err && typeof err === "object" && "code" in err && err.code === "P2034") {
+        req.log.warn({ err }, "retryable milestone creation serialization conflict");
+        return sendError(res, 409, "Milestone creation conflicted; please retry", "RETRYABLE_WRITE_CONFLICT");
+      }
+      req.log.error({ err }, "database error creating milestone");
       return sendError(res, 500, "Internal server error");
     }
   });
@@ -3993,9 +4331,10 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     try {
       const username = req.params.username as string;
       const milestoneId = req.params.milestoneId as string;
-      
+
       const profile = await prisma.profile.findUnique({
         where: { username },
+        include: { acceptedAssets: true },
       });
 
       if (!profile) {
@@ -4024,12 +4363,44 @@ All errors return JSON with an \`error\` field and optional \`code\`:
         return sendError(res, 400, "Cannot change targetAmount of a reached milestone");
       }
 
-      const data: typeof parsed.data & { status?: string } = { ...parsed.data };
-      if (
+      // If the asset identity is changing, reset progress so amounts aren't
+      // silently misrepresented in the new currency.
+      const assetChanging =
+        (parsed.data.assetCode !== undefined && parsed.data.assetCode !== milestone.assetCode) ||
+        (parsed.data.assetIssuer !== undefined && parsed.data.assetIssuer !== milestone.assetIssuer);
+
+      // Validate new asset against accepted assets if asset is being changed
+      if (assetChanging) {
+        const newAssetCode = parsed.data.assetCode ?? milestone.assetCode;
+        const newAssetIssuer = parsed.data.assetIssuer ?? milestone.assetIssuer;
+        const acceptedCodes = profile.acceptedAssets.map((a: { code: string }) => a.code);
+        if (acceptedCodes.length > 0 && !isAcceptedAssetPair(profile.acceptedAssets, newAssetCode, newAssetIssuer ?? null)) {
+          return sendError(
+            res,
+            400,
+            `Asset '${newAssetCode}'${newAssetIssuer ? ` (issuer ${newAssetIssuer})` : ""} is not accepted by this profile. Accepted: ${acceptedCodes.join(", ")}`,
+          );
+        }
+      }
+
+      const data: typeof parsed.data & {
+        currentAmount?: number;
+        status?: string;
+        reachedAt?: Date | null;
+      } = { ...parsed.data };
+
+      if (assetChanging) {
+        data.currentAmount = 0;
+        data.status = "active";
+        data.reachedAt = null;
+      } else if (
         parsed.data.targetAmount !== undefined &&
         Number(milestone.currentAmount) >= Number(parsed.data.targetAmount)
       ) {
         data.status = "reached";
+        data.reachedAt = milestone.reachedAt ?? new Date();
+      } else if (milestone.status === "reached" && parsed.data.title !== undefined) {
+        data.reachedAt = milestone.reachedAt;
       }
 
       const updated = await prisma.milestone.update({
@@ -4118,6 +4489,9 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       }
 
       const reporterIp = req.ip ?? "unknown";
+      // Reports are used transiently for abuse detection; the reporter IP is
+      // purged after 90 days to comply with the privacy policy (#870).
+      const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
 
       await (prisma as any).profileReport.create({
         data: {
@@ -4125,6 +4499,7 @@ All errors return JSON with an \`error\` field and optional \`code\`:
           reason: parsed.data.reason,
           details: parsed.data.details ?? null,
           reporterIp,
+          expiresAt,
         },
       });
 
@@ -4134,7 +4509,8 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       });
 
       const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
-      if (reportCount >= 3 && ADMIN_EMAIL) {
+      // Alert only when the threshold is first reached, not on every later report (#1197).
+      if (reportCount === 3 && ADMIN_EMAIL) {
         try {
           const { sendEmail } = await import("./mailer.js");
           await sendEmail({
@@ -4169,51 +4545,63 @@ All errors return JSON with an \`error\` field and optional \`code\`:
         return sendError(res, 400, "Invalid Stellar address");
       }
 
-      const limit = Math.min(parseInt(req.query.limit as string) || 10, 100);
-      const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
+      const pagination = paginationSchema.safeParse(req.query);
+      if (!pagination.success) {
+        return sendError(res, 400, "Invalid pagination parameters");
+      }
+      const { limit, offset } = pagination.data;
 
-      const [transactions, totalCount] = await Promise.all([
+      const whereClause = { supporterAddress: address };
+
+      const [transactions, totalCount, assetAggregates, profileAggregates] = await Promise.all([
         prisma.supportTransaction.findMany({
-          where: { supporterAddress: address },
+          where: whereClause,
           include: { profile: { select: { username: true, displayName: true } } },
           orderBy: { createdAt: "desc" },
           take: limit,
           skip: offset,
         }),
         prisma.supportTransaction.count({
-          where: { supporterAddress: address },
+          where: whereClause,
+        }),
+        // Aggregate totals per asset across ALL matching transactions (not just this page)
+        prisma.supportTransaction.groupBy({
+          by: ["assetCode"],
+          where: whereClause,
+          _sum: { amount: true },
+        }),
+        // Count distinct profiles across ALL matching transactions
+        prisma.supportTransaction.groupBy({
+          by: ["profileId"],
+          where: whereClause,
+          _count: { id: true },
+          orderBy: { _count: { id: "desc" } },
         }),
       ]);
 
-      const profilesSupported = new Set(transactions.map((tx: any) => tx.profileId)).size;
-      const assetMap = new Map<string, number>();
-      for (const tx of transactions) {
-        const key = tx.assetCode as string;
-        assetMap.set(key, (assetMap.get(key) ?? 0) + parseFloat(tx.amount.toString()));
-      }
-      const totalByAsset = Array.from(assetMap.entries()).map(([assetCode, total]) => ({
-        assetCode,
-        total: total.toFixed(7),
+      const profilesSupported = profileAggregates.length;
+
+      const totalByAsset = assetAggregates.map((row: any) => ({
+        assetCode: row.assetCode as string,
+        total: (row._sum.amount ?? 0).toFixed(7),
       }));
 
-      const supportedProfiles = Array.from(
-        transactions
-          .reduce((profiles: Map<string, { username: string; displayName: string; totalTransactions: number }>, tx: any) => {
-            const existing = profiles.get(tx.profileId);
-            if (existing) {
-              existing.totalTransactions += 1;
-              return profiles;
-            }
+      // Fetch display names for all profiles that appear in the aggregate
+      const profileIds = profileAggregates.map((r: any) => r.profileId as string);
+      const profileRows = await prisma.profile.findMany({
+        where: { id: { in: profileIds } },
+        select: { id: true, username: true, displayName: true },
+      });
+      const profileById = new Map(profileRows.map((p: any) => [p.id, p]));
 
-            profiles.set(tx.profileId, {
-              username: tx.profile.username,
-              displayName: tx.profile.displayName,
-              totalTransactions: 1,
-            });
-            return profiles;
-          }, new Map())
-          .values(),
-      ).sort((a, b) => b.totalTransactions - a.totalTransactions);
+      const supportedProfiles = profileAggregates.map((row: any) => {
+        const p = profileById.get(row.profileId as string);
+        return {
+          username: p?.username ?? "",
+          displayName: p?.displayName ?? "",
+          totalTransactions: row._count.id as number,
+        };
+      });
 
       const history = transactions.map((tx: any) => ({
         id: tx.id,
@@ -4241,12 +4629,28 @@ All errors return JSON with an \`error\` field and optional \`code\`:
           hasMore: offset + limit < totalCount,
         },
       });
-    } catch {
+    } catch (err) {
+      req.log.error({ err }, "failed to fetch supporter history");
       return sendError(res, 500, "Internal server error");
     }
   });
 
   // ── Recurring Support ───────────────────────────────────────────────────
+
+  // Checks that (assetCode, assetIssuer) matches one of the profile's
+  // accepted (code, issuer) pairs, not just the asset code in isolation.
+  // `issuer` is nullable (e.g. native XLM has no issuer), so null/undefined
+  // are treated as equivalent "no issuer".
+  function isAcceptedAssetPair(
+    acceptedAssets: { code: string; issuer: string | null }[],
+    assetCode: string,
+    assetIssuer: string | null | undefined,
+  ): boolean {
+    const normalizedIssuer = assetIssuer ?? null;
+    return acceptedAssets.some(
+      (a) => a.code === assetCode && (a.issuer ?? null) === normalizedIssuer,
+    );
+  }
 
   const recurringSchema = z.object({
     profileId:   z.string().min(1),
@@ -4270,8 +4674,8 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     if (!profile) return sendError(res, 404, "Profile not found");
 
     const acceptedCodes = profile.acceptedAssets.map((a: { code: string }) => a.code);
-    if (acceptedCodes.length > 0 && !acceptedCodes.includes(assetCode)) {
-      return sendError(res, 400, `Asset '${assetCode}' is not accepted by this profile. Accepted: ${acceptedCodes.join(", ")}`);
+    if (acceptedCodes.length > 0 && !isAcceptedAssetPair(profile.acceptedAssets, assetCode, assetIssuer)) {
+      return sendError(res, 400, `Asset '${assetCode}'${assetIssuer ? ` (issuer ${assetIssuer})` : ""} is not accepted by this profile. Accepted: ${acceptedCodes.join(", ")}`);
     }
 
     const user = await prisma.user.findFirst({ where: { email: req.auth!.walletAddress } });
@@ -4304,6 +4708,12 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     const user = await prisma.user.findFirst({ where: { email: req.auth!.walletAddress } });
     if (!user) return sendError(res, 401, "User not found");
 
+    const pagination = paginationSchema.safeParse(req.query);
+    if (!pagination.success) {
+      return sendError(res, 400, "Invalid pagination parameters", "INVALID_PAGINATION");
+    }
+    const { limit, offset } = pagination.data;
+
     const { profileId } = req.query as { profileId?: string };
 
     if (profileId) {
@@ -4316,6 +4726,8 @@ All errors return JSON with an \`error\` field and optional \`code\`:
         where: { profileId, status: { not: "cancelled" } },
         include: { supporter: { select: { email: true } } },
         orderBy: { createdAt: "desc" },
+        take: limit,
+        skip: offset,
       });
 
       return res.json(subscriptions.map((s) => ({
@@ -4337,6 +4749,8 @@ All errors return JSON with an \`error\` field and optional \`code\`:
       where: { supporterId: user.id, status: { not: "cancelled" } },
       include: { profile: { select: { username: true, displayName: true, avatarUrl: true } } },
       orderBy: { createdAt: "desc" },
+      take: limit,
+      skip: offset,
     });
 
     return res.json(subscriptions.map((s) => ({
@@ -4380,6 +4794,25 @@ All errors return JSON with an \`error\` field and optional \`code\`:
     if (subscription.supporterId !== user.id) return sendError(res, 403, "Forbidden");
 
     const { status, frequency, amount, assetIssuer } = parsed.data;
+
+    if (assetIssuer !== undefined) {
+      const profile = await prisma.profile.findUnique({
+        where: { id: subscription.profileId },
+        include: { acceptedAssets: true },
+      });
+      if (!profile) return sendError(res, 404, "Profile not found");
+
+      if (
+        profile.acceptedAssets.length > 0 &&
+        !isAcceptedAssetPair(profile.acceptedAssets, subscription.assetCode, assetIssuer)
+      ) {
+        return sendError(
+          res,
+          400,
+          `Asset '${subscription.assetCode}'${assetIssuer ? ` (issuer ${assetIssuer})` : ""} is not accepted by this profile`,
+        );
+      }
+    }
 
     // Recalculate nextRunAt when frequency changes
     let nextRunAt: Date | undefined;
@@ -4550,6 +4983,13 @@ All errors return JSON with an \`error\` field and optional \`code\`:
 
     if (isNaN(to.getTime()) || isNaN(from.getTime())) {
       return res.status(400).json({ error: "Invalid from or to date" });
+    }
+
+    // Reject requests spanning more than 2 years to prevent the fillGaps
+    // loop from blocking the event loop on wide unauthenticated requests.
+    const MAX_RANGE_MS = 2 * 365 * 24 * 60 * 60 * 1000;
+    if (to.getTime() - from.getTime() > MAX_RANGE_MS) {
+      return res.status(400).json({ error: "Date range must not exceed 2 years" });
     }
 
     const profile = await prisma.profile.findUnique({

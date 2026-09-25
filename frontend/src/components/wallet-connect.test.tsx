@@ -11,7 +11,8 @@ vi.mock('@stellar/freighter-api', () => ({
 }));
 
 // Mock @/lib/config
-vi.mock('@/lib/config', () => ({
+vi.mock('@/lib/config', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/config')>()),
   HORIZON_URL: 'https://horizon-testnet.stellar.org',
   API_BASE_URL: 'http://localhost:4000',
   STELLAR_NETWORK: 'TESTNET',
@@ -109,7 +110,8 @@ describe('WalletConnect', () => {
     await waitFor(() => {
       expect(screen.getByText(errorMsg)).toBeInTheDocument();
     });
-    expect(screen.getByText('Connection failed.')).toBeInTheDocument();
+    // The specific error replaces the generic status line rather than joining it.
+    expect(screen.queryByText('Connection failed.')).not.toBeInTheDocument();
   });
 
   it('renders multiple wallet options when multiple detected', () => {

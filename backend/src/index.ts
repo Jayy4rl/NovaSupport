@@ -109,6 +109,12 @@ import { startWebhookProcessor } from "./services/webhook-processor.js";
 import { EventIndexer } from "./services/event-indexer.js";
 import { createSorobanRpcClient } from "./services/soroban-rpc-client.js";
 import { startWeeklyDigestScheduler, stopWeeklyDigestScheduler } from "./services/weekly-digest.js";
+import {
+  startIpRetentionPurgeScheduler,
+  stopIpRetentionPurgeScheduler,
+  startRevokedTokenPurgeScheduler,
+  stopRevokedTokenPurgeScheduler,
+} from "./services/ip-retention-purge.js";
 import { prisma } from "./db.js";
 import { connectRedis, disconnectRedis } from "./services/redis.js";
 
@@ -124,9 +130,13 @@ const sorobanRpcUrl =
 const indexerStartLedger = process.env.INDEXER_START_LEDGER
   ? Number(process.env.INDEXER_START_LEDGER)
   : undefined;
-const indexerMaxPagesPerTick = process.env.INDEXER_MAX_PAGES_PER_TICK
+const rawMaxPages = process.env.INDEXER_MAX_PAGES_PER_TICK
   ? Number(process.env.INDEXER_MAX_PAGES_PER_TICK)
   : undefined;
+const indexerMaxPagesPerTick =
+  rawMaxPages !== undefined && Number.isFinite(rawMaxPages)
+    ? rawMaxPages
+    : undefined;
 
 const eventIndexer =
   contractId.trim().length > 0
@@ -154,6 +164,12 @@ const server = app.listen(port, () => {
 
   // Start the weekly digest email scheduler
   startWeeklyDigestScheduler();
+
+  // Start the reporter IP retention purge scheduler
+  startIpRetentionPurgeScheduler();
+
+  // Start the revoked token purge scheduler
+  startRevokedTokenPurgeScheduler();
 
   // Start the webhook delivery processor
   webhookProcessor = startWebhookProcessor();
@@ -183,6 +199,8 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
       webhookProcessor?.stop(),
       eventIndexer?.stop(),
       Promise.resolve().then(() => stopWeeklyDigestScheduler()),
+      Promise.resolve().then(() => stopIpRetentionPurgeScheduler()),
+      Promise.resolve().then(() => stopRevokedTokenPurgeScheduler()),
     ]);
 
     await new Promise<void>((resolve, reject) => {

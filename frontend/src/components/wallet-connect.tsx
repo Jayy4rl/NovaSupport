@@ -28,6 +28,7 @@ export function WalletConnect({ onConnect }: WalletConnectProps = {}) {
   const [status, setStatus] = useState("Choose a wallet to connect.");
   const [error, setError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [connectingWalletId, setConnectingWalletId] = useState<WalletId | null>(null);
 
   useEffect(() => {
     setAvailable(getAvailableWallets());
@@ -50,6 +51,7 @@ export function WalletConnect({ onConnect }: WalletConnectProps = {}) {
     if (!adapter) return;
 
     setConnecting(true);
+    setConnectingWalletId(walletId);
     setError(null);
     setStatus(`Connecting to ${adapter.name}...`);
 
@@ -73,6 +75,7 @@ export function WalletConnect({ onConnect }: WalletConnectProps = {}) {
       setStatus("Connection failed.");
     } finally {
       setConnecting(false);
+      setConnectingWalletId(null);
     }
   }, [onConnect]);
 
@@ -152,7 +155,7 @@ export function WalletConnect({ onConnect }: WalletConnectProps = {}) {
                   <p className="text-sm font-semibold text-white">{wallet.name}</p>
                   <p className="text-xs text-sky/60">Click to connect</p>
                 </div>
-                {connecting && activeWallet === wallet.id && (
+                {connectingWalletId === wallet.id && (
                   <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-mint border-t-transparent" />
                 )}
               </button>

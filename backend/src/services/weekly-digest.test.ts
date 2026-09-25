@@ -1,6 +1,7 @@
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { sendWeeklyDigests } from "./weekly-digest.js";
+import { escapeHtml } from "./email.js";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -40,7 +41,7 @@ function makePrismaMock(overrides: {
   const uniqueSupportersFindMany = mock.fn((_arg?: unknown) =>
     Promise.resolve(overrides.uniqueSupporters ?? [{ supporterAddress: "GABC" }]),
   );
-  const milestoneFindMany = mock.fn(() =>
+  const milestoneFindMany = mock.fn((_arg?: unknown) =>
     Promise.resolve(overrides.milestones ?? []),
   );
   const txGroupBy = mock.fn(() =>
@@ -65,29 +66,34 @@ function makePrismaMock(overrides: {
 // ── issue #656: cross-asset sum removed ──────────────────────────────────────
 
 test("sendWeeklyDigests email does not contain a cross-asset totalReceived figure", async () => {
-  const capturedEmails: string[] = [];
+  const capturedEmails: Array<{ to: string; subject: string; html?: string; text?: string }> = [];
 
-  // Patch sendEmail dynamically via module mock isn't available in node:test.
-  // We verify the fix indirectly by checking the assetBreakdown format is present
-  // and that no single numeric total appears by inspecting assetGroups directly.
+  const mockSendEmail = mock.fn(async (opts: { to: string; subject: string; html?: string; text?: string }) => {
+    capturedEmails.push(opts);
+  });
+
   const xlmGroup = makeAssetGroup("XLM", "5");
   const usdcGroup = makeAssetGroup("USDC", "5");
 
+  const mockPrisma = makePrismaMock({
+    assetGroups: [xlmGroup, usdcGroup],
+  });
+
+  await sendWeeklyDigests(mockPrisma as any, mockSendEmail as any);
+
+  // The function was called — an email was sent
+  assert.ok(capturedEmails.length > 0, "sendEmail should have been called");
+
+  const html = capturedEmails[0].html ?? "";
+
   // The old (wrong) behaviour would produce "10.0000000" — sum of 5+5.
-  // The new behaviour shows "5.0000000 XLM, 5.0000000 USDC".
+  // The new behaviour shows per-asset breakdown only.
   const wrongTotal = (5 + 5).toFixed(7); // "10.0000000"
-  const correctBreakdown = `${(5).toFixed(7)} XLM, ${(5).toFixed(7)} USDC`;
+  assert.ok(!html.includes(wrongTotal), "cross-asset total must not appear in email HTML");
 
-  // Verify that the assetBreakdown string is correct and the cross-sum isn't
-  const assetBreakdown = [xlmGroup, usdcGroup]
-    .map((g) => `${g._sum.amount.toFixed(7)} ${g.assetCode}`)
-    .join(", ");
-
-  assert.equal(assetBreakdown, correctBreakdown);
-  assert.notEqual(assetBreakdown, wrongTotal);
-
-  // And confirm 10.0000000 does NOT appear in the breakdown
-  assert.ok(!assetBreakdown.includes(wrongTotal), "cross-asset total must not appear in assetBreakdown");
+  // Per-asset amounts should still be present
+  assert.ok(html.includes("5.0000000 XLM"), "XLM amount should appear in email");
+  assert.ok(html.includes("5.0000000 USDC"), "USDC amount should appear in email");
 });
 
 // ── issue #657: profile batch pagination ─────────────────────────────────────
@@ -172,4 +178,45 @@ test("sendWeeklyDigests skips profiles with no transactions this week", async ()
 
   // Should not throw even with no transactions
   await assert.doesNotReject(() => sendWeeklyDigests(mockPrisma as any));
+});
+
+test("sendWeeklyDigests filters milestone reach events by reachedAt instead of updatedAt", async () => {
+  const mockPrisma = makePrismaMock({
+    profiles: [makeProfile()],
+    transactions: [{ amount: 5n, assetCode: "XLM", createdAt: new Date() }],
+    milestones: [],
+    assetGroups: [makeAssetGroup("XLM", "5")],
+  });
+
+  await sendWeeklyDigests(mockPrisma as any);
+
+  const milestoneCall = mockPrisma.milestone.findMany.mock.calls[0]?.arguments[0] as {
+    where: { status: string; reachedAt?: { gte: Date }; updatedAt?: unknown };
+  } | undefined;
+  assert.ok(milestoneCall);
+  assert.deepEqual(milestoneCall.where.status, "reached");
+  assert.ok(milestoneCall.where.reachedAt);
+  assert.ok(milestoneCall.where.reachedAt.gte instanceof Date);
+  assert.equal("updatedAt" in milestoneCall.where, false);
+});
+
+// ── issue #984: XSS via assetCode in digest HTML ──────────────────────────────
+
+test("escapeHtml neutralises script tags in assetCode", () => {
+  const malicious = '<script>alert("xss")</script>';
+  const safe = escapeHtml(malicious);
+  assert.ok(!safe.includes("<script>"), "escaped output must not contain raw <script>");
+  assert.ok(safe.includes("&lt;script&gt;"), "escaped output must contain HTML entities");
+});
+
+test("escapeHtml neutralises double-quote in assetCode", () => {
+  const malicious = 'USDC" onload="alert(1)';
+  const safe = escapeHtml(malicious);
+  assert.ok(!safe.includes('"'), "escaped output must not contain raw double quotes");
+  assert.ok(safe.includes("&quot;"), "escaped output must contain &quot;");
+});
+
+test("escapeHtml leaves clean strings unchanged", () => {
+  assert.equal(escapeHtml("XLM"), "XLM");
+  assert.equal(escapeHtml("USDC"), "USDC");
 });

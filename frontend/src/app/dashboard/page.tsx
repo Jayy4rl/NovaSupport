@@ -29,6 +29,7 @@ interface Milestone {
   targetAmount: string;
   currentAmount: string;
   assetCode: string;
+  assetIssuer?: string | null;
   status: string;
   createdAt: string;
 }
@@ -38,6 +39,12 @@ interface MilestoneFormData {
   description: string;
   targetAmount: string;
   assetCode: string;
+  assetIssuer: string | null;
+}
+
+interface AcceptedAsset {
+  code: string;
+  issuer?: string | null;
 }
 
 interface Webhook {
@@ -70,7 +77,9 @@ export default function DashboardPage() {
     description: "",
     targetAmount: "",
     assetCode: "XLM",
+    assetIssuer: null,
   });
+  const [acceptedAssets, setAcceptedAssets] = useState<AcceptedAsset[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
 
@@ -91,19 +100,28 @@ export default function DashboardPage() {
   useEffect(() => {
     async function loadDashboard() {
       try {
-        // Get username from localStorage or session
-        const storedUsername = localStorage.getItem("username");
-        if (!storedUsername) {
+        const meRes = await apiFetch(`${API_BASE_URL}/auth/me`, {
+          suppressAuthExpired: true,
+        } as RequestInit & { suppressAuthExpired?: boolean });
+        if (!meRes.ok) {
           router.push("/");
           return;
         }
 
-        setUsername(storedUsername);
+        const me = await meRes.json();
+        const resolvedUsername = typeof me?.username === "string" ? me.username : null;
+        if (!resolvedUsername) {
+          router.push("/");
+          return;
+        }
 
-        const [statsRes, milestonesRes, webhooksRes] = await Promise.all([
-          apiFetch(`${API_BASE_URL}/profiles/${storedUsername}/stats`),
-          apiFetch(`${API_BASE_URL}/profiles/${storedUsername}/milestones`),
-          apiFetch(`${API_BASE_URL}/profiles/${storedUsername}/webhooks`),
+        setUsername(resolvedUsername);
+
+        const [statsRes, milestonesRes, webhooksRes, profileRes] = await Promise.all([
+          apiFetch(`${API_BASE_URL}/profiles/${resolvedUsername}/stats`),
+          apiFetch(`${API_BASE_URL}/profiles/${resolvedUsername}/milestones`),
+          apiFetch(`${API_BASE_URL}/profiles/${resolvedUsername}/webhooks`),
+          apiFetch(`${API_BASE_URL}/profiles/${resolvedUsername}`),
         ]);
 
         if (statsRes.ok) {
@@ -120,6 +138,11 @@ export default function DashboardPage() {
           const webhooksData = await webhooksRes.json();
           setWebhooks(webhooksData.webhooks || []);
         }
+
+        if (profileRes.ok) {
+          const profileData = await profileRes.json();
+          setAcceptedAssets(profileData.acceptedAssets || []);
+        }
       } catch (err: any) {
         setError(err.message);
       } finally {
@@ -132,7 +155,7 @@ export default function DashboardPage() {
 
   const handleAddMilestone = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!username || !formData.title || !formData.targetAmount) return;
+    if (!username || !formData.title.trim() || !formData.targetAmount) return;
 
     setSubmitting(true);
     try {
@@ -149,6 +172,7 @@ export default function DashboardPage() {
           description: formData.description || null,
           targetAmount: formData.targetAmount,
           assetCode: formData.assetCode,
+          assetIssuer: formData.assetIssuer,
         }),
       });
 
@@ -168,7 +192,7 @@ export default function DashboardPage() {
         setMilestones([newMilestone, ...milestones]);
       }
 
-      setFormData({ title: "", description: "", targetAmount: "", assetCode: "XLM" });
+      setFormData({ title: "", description: "", targetAmount: "", assetCode: "XLM", assetIssuer: null });
       setShowMilestoneForm(false);
       setEditingMilestone(null);
     } catch (err: any) {
@@ -185,6 +209,7 @@ export default function DashboardPage() {
       description: milestone.description || "",
       targetAmount: milestone.targetAmount,
       assetCode: milestone.assetCode,
+      assetIssuer: milestone.assetIssuer ?? null,
     });
     setShowMilestoneForm(true);
   };
@@ -216,7 +241,7 @@ export default function DashboardPage() {
   const cancelForm = () => {
     setShowMilestoneForm(false);
     setEditingMilestone(null);
-    setFormData({ title: "", description: "", targetAmount: "", assetCode: "XLM" });
+    setFormData({ title: "", description: "", targetAmount: "", assetCode: "XLM", assetIssuer: null });
   };
 
   const handleAddWebhook = async (e: React.FormEvent) => {
@@ -330,8 +355,10 @@ export default function DashboardPage() {
     }
   };
 
-  const getEmbedCode = (user: string) =>
-    `<iframe\n  src="https://novasupport.xyz/embed/${user}"\n  width="400"\n  height="320"\n  frameborder="0"\n  style="border-radius:16px"\n></iframe>`;
+  const getEmbedCode = (user: string) => {
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    return `<iframe\n  src="${origin}/embed/${user}"\n  width="400"\n  height="320"\n  frameborder="0"\n  style="border-radius:16px"\n></iframe>`;
+  };
 
   const handleCopyEmbed = async () => {
     if (!username) return;
@@ -370,6 +397,37 @@ export default function DashboardPage() {
       </AppShell>
     );
   }
+
+  // Build the asset dropdown from the profile's actual accepted assets so a
+  // creator can only pick what they actually accept. Fall back to the default
+  // assets when none are configured. Always ensure the currently-selected
+  // asset (e.g. one being edited) is present in the list.
+  const assetOptions: AcceptedAsset[] = (() => {
+    const base: AcceptedAsset[] =
+      acceptedAssets.length > 0
+        ? acceptedAssets
+        : [
+            { code: "XLM", issuer: null },
+            { code: "USDC", issuer: null },
+            { code: "AQUA", issuer: null },
+          ];
+    const exists = base.some(
+      (a) => a.code === formData.assetCode && (a.issuer ?? "") === (formData.assetIssuer ?? ""),
+    );
+    if (!exists && formData.assetCode) {
+      return [...base, { code: formData.assetCode, issuer: formData.assetIssuer }];
+    }
+    return base;
+  })();
+
+  const selectedAssetIndex = assetOptions.findIndex(
+    (a) => a.code === formData.assetCode && (a.issuer ?? "") === (formData.assetIssuer ?? ""),
+  );
+
+  const renderAssetLabel = (a: AcceptedAsset) =>
+    a.issuer
+      ? `${a.code} (${a.issuer.slice(0, 4)}…${a.issuer.slice(-4)})`
+      : a.code;
 
   return (
     <AppShell>
@@ -497,13 +555,22 @@ export default function DashboardPage() {
                       Asset
                     </label>
                     <select
-                      value={formData.assetCode}
-                      onChange={(e) => setFormData({ ...formData, assetCode: e.target.value })}
+                      value={selectedAssetIndex < 0 ? "" : selectedAssetIndex}
+                      onChange={(e) => {
+                        const opt = assetOptions[Number(e.target.value)];
+                        setFormData({
+                          ...formData,
+                          assetCode: opt.code,
+                          assetIssuer: opt.issuer ?? null,
+                        });
+                      }}
                       className="mt-2 min-h-[44px] w-full rounded-lg bg-white/5 border border-white/10 px-3 py-3 text-sm text-white focus:outline-none focus:border-mint/50"
                     >
-                      <option value="XLM">XLM</option>
-                      <option value="USDC">USDC</option>
-                      <option value="AQUA">AQUA</option>
+                      {assetOptions.map((a, i) => (
+                        <option key={i} value={i}>
+                          {renderAssetLabel(a)}
+                        </option>
+                      ))}
                     </select>
                   </div>
                 </div>
@@ -536,10 +603,14 @@ export default function DashboardPage() {
           ) : (
             <div className="space-y-3">
               {milestones.map((milestone) => {
-                const progress = Math.min(
-                  (parseFloat(milestone.currentAmount) / parseFloat(milestone.targetAmount)) * 100,
-                  100
-                );
+                const currentAmount = parseFloat(milestone.currentAmount);
+                const targetAmount = parseFloat(milestone.targetAmount);
+                const progress =
+                  Number.isFinite(currentAmount) &&
+                  Number.isFinite(targetAmount) &&
+                  targetAmount > 0
+                    ? Math.min((currentAmount / targetAmount) * 100, 100)
+                    : 0;
 
                 return (
                   <motion.div

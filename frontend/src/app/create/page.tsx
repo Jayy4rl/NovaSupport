@@ -37,6 +37,12 @@ const CONSTRAINTS = [
   { field: "GitHub", rule: "Optional · max 39 chars · hyphens allowed" },
 ];
 
+// Well-known Stellar mainnet issuers for preset assets offered in onboarding.
+// XLM is native and never has an issuer.
+const KNOWN_ISSUERS: Record<string, string> = {
+  USDC: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3THOJ2E37CEGOEZWDSP",
+};
+
 export default function CreatePage() {
   const router = useRouter();
   const { toast, showToast, dismiss } = useToast();
@@ -47,7 +53,7 @@ export default function CreatePage() {
     displayName: "",
     bio: "",
     walletAddress: "",
-    acceptedAssets: ["XLM", "USDC"],
+    acceptedAssets: ["XLM"],
     twitterHandle: "",
     githubHandle: "",
     websiteUrl: "",
@@ -133,7 +139,7 @@ export default function CreatePage() {
 
   const handleNext = () => {
     if (step === 1) {
-      if (!form.displayName || !form.username) {
+      if (!form.displayName.trim() || !form.username.trim()) {
         setError("Display name and username are required.");
         return;
       }
@@ -151,8 +157,13 @@ export default function CreatePage() {
         setError(walletValidation.error || "Please enter a valid Stellar wallet address.");
         return;
       }
-      if (form.acceptedAssets.length === 0) {
+      if (assets.length === 0) {
         setError("Please select at least one accepted asset.");
+        return;
+      }
+      const missingIssuer = assets.find((a) => a.code !== "XLM" && !a.issuer.trim());
+      if (missingIssuer) {
+        setError(`Issuer required for ${missingIssuer.code} — please enter the Stellar issuer address.`);
         return;
       }
     }
@@ -376,8 +387,8 @@ export default function CreatePage() {
                       placeholder="G…"
                       value={form.walletAddress}
                       onChange={(e) => {
-                        const raw = e.target.value;
-                        const cleaned = raw.length > 56 && !raw.startsWith("G") ? raw.slice(0, 56) : raw;
+                        const raw = e.target.value.trim();
+                        const cleaned = raw.startsWith("G") && raw.length > 56 ? raw.slice(0, 56) : raw;
                         setForm((prev) => ({ ...prev, walletAddress: cleaned }));
                         setError(null);
                       }}
@@ -429,12 +440,13 @@ export default function CreatePage() {
                       <button
                         key={asset}
                         type="button"
+                        aria-pressed={assets.some((a) => a.code === asset)}
                         onClick={() => {
                           const isSelected = assets.some((a) => a.code === asset);
                           setAssets(
                             isSelected
                               ? assets.filter((a) => a.code !== asset)
-                              : [...assets, { code: asset, issuer: "" }]
+                              : [...assets, { code: asset, issuer: KNOWN_ISSUERS[asset] ?? "" }]
                           );
                           setForm((prev) => ({
                             ...prev,
@@ -453,6 +465,45 @@ export default function CreatePage() {
                       </button>
                     ))}
                   </div>
+                  {assets.some((a) => a.code !== "XLM") && (
+                    <div className="space-y-3 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                      <p className="text-[10px] uppercase tracking-[0.25em] text-steel">
+                        Asset issuers <span className="text-mint">*</span> — required for non-XLM assets
+                      </p>
+                      {assets
+                        .filter((a) => a.code !== "XLM")
+                        .map((asset) => (
+                          <div key={asset.code} className="flex flex-col gap-1.5">
+                            <label className="text-xs font-medium text-steel">
+                              {asset.code} issuer
+                            </label>
+                            <input
+                              type="text"
+                              placeholder={
+                                KNOWN_ISSUERS[asset.code] ? `Default: ${KNOWN_ISSUERS[asset.code].slice(0, 8)}…` : "G… Stellar issuer address"
+                              }
+                              value={asset.issuer}
+                              onChange={(e) => {
+                                const val = e.target.value.trim();
+                                setAssets((prev) =>
+                                  prev.map((p) => (p.code === asset.code ? { ...p, issuer: val } : p))
+                                );
+                              }}
+                              className={`w-full rounded-xl border bg-white/5 px-3 py-2 font-mono text-xs text-white placeholder:text-steel/40 focus:outline-none focus:ring-1 transition ${
+                                asset.issuer.trim() === ""
+                                  ? "border-amber-500/40 focus:border-amber-500/50 focus:ring-amber-500/20"
+                                  : "border-white/10 focus:border-mint/50 focus:ring-mint/20"
+                              }`}
+                            />
+                            {asset.issuer.trim() === "" && (
+                              <p className="text-[10px] text-amber-400">
+                                Issuer required — without it, this asset will not be accepted for payments.
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )}

@@ -103,16 +103,22 @@ export async function invalidateProfileLeaderboardCache(profileId: string): Prom
     const redis = getRedisClient()!;
     try {
       const pattern = `${CACHE_KEY_PREFIX}${profileId}:*`;
-      const keys = await redis.keys(pattern);
-      if (keys.length > 0) {
-        await redis.del(...keys);
-      }
+      let cursor = "0";
+      do {
+        const result = await redis.scan(cursor, "MATCH", pattern, "COUNT", 100);
+        cursor = result[0];
+        const keys = result[1];
+        if (keys.length > 0) {
+          await redis.del(...keys);
+        }
+      } while (cursor !== "0");
     } catch {
-      invalidateInProcessCache(profileId);
+      // Redis error handled below — in-process cache is always invalidated
     }
-    return;
   }
 
+  // Always clear the in-process fallback cache regardless of the Redis path,
+  // so a stale entry can never be served after this call reports success.
   invalidateInProcessCache(profileId);
 }
 

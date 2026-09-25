@@ -1,16 +1,6 @@
 import { prisma } from "../db.js";
 import { logger } from "../logger.js";
 
-function getBadgeNameByCriterion(criterion: string): string {
-  const map: Record<string, string> = {
-    first_support: "First Supporter",
-    ten_supporters: "10 Supporters",
-    total_100_xlm: "100 XLM Club",
-    milestone_reached: "Milestone Maker",
-  };
-  return map[criterion] ?? "";
-}
-
 function profileLockKey(profileId: string): bigint {
   let h = 0n;
   for (let i = 0; i < profileId.length; i++) {

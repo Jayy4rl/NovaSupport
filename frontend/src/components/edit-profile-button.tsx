@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { getAddress } from "@stellar/freighter-api";
+import { getStoredWalletAddress } from "@/lib/wallet-adapters";
 
 export function EditProfileButton({
   username,
@@ -14,12 +14,8 @@ export function EditProfileButton({
   const [isOwner, setIsOwner] = useState(false);
 
   useEffect(() => {
-    getAddress()
-      .then((result) => {
-        const addr = "address" in result ? result.address : "";
-        setIsOwner(Boolean(addr && addr === walletAddress));
-      })
-      .catch(() => {});
+    const storedAddress = getStoredWalletAddress();
+    setIsOwner(Boolean(storedAddress && storedAddress === walletAddress));
   }, [walletAddress]);
 
   if (!isOwner) return null;

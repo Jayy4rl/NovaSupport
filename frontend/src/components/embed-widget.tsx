@@ -11,7 +11,7 @@ type Asset = {
 type ProfileStats = {
   totalTransactions: number;
   uniqueSupporters: number;
-  assetTotals: Array<{ assetCode: string; total: string }>;
+  assetTotals?: Array<{ assetCode: string; total: string }>;
 };
 
 type Supporter = {
@@ -95,7 +95,7 @@ export function EmbedWidget({
           />
         ) : (
           <div className="w-10 h-10 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold flex-shrink-0">
-            {displayName.slice(0, 2).toUpperCase()}
+            {(displayName ? displayName.slice(0, 2) : "?").toUpperCase()}
           </div>
         )}
         <div className="min-w-0">
@@ -124,7 +124,7 @@ export function EmbedWidget({
             </p>
             <p className={`font-bold ${t.text}`}>{stats.totalTransactions}</p>
           </div>
-          {stats.assetTotals.slice(0, 1).map((a) => (
+          {stats.assetTotals?.slice(0, 1).map((a) => (
             <div key={a.assetCode}>
               <p className={`${t.muted} uppercase tracking-wider`} style={{ fontSize: "0.6rem" }}>
                 Total ({a.assetCode})

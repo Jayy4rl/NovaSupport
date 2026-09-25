@@ -39,7 +39,7 @@ export async function processPendingWebhookDeliveries(
     if (claimed.count === 0) continue;
 
     const payload = delivery.payload as Record<string, unknown>;
-    const result = await deliver(delivery.webhook.url, delivery.webhook.secretHash, payload);
+    const result = await deliver(delivery.webhook.url, delivery.webhook.signingKey, payload);
 
     if (result.status === "success") {
       await prismaClient.webhookDelivery.update({
@@ -103,42 +103,38 @@ let processorInterval: ReturnType<typeof setInterval> | null = null;
 let processorInFlight: Promise<void> | null = null;
 let processorStopped = true;
 
-function runWebhookProcessorTick(): void {
-  processorInFlight = processPendingWebhookDeliveries()
-    .catch((err) => {
-      logger.error({ err }, "Error in webhook processor run");
-    })
-    .finally(() => {
-      processorInFlight = null;
-    });
-}
+type ProcessorOptions = {
+  redisAvailable?: boolean;
+  intervalMs?: number;
+  processPending?: typeof processPendingWebhookDeliveries;
+  startQueue?: typeof createWebhookQueue;
+  startWorker?: typeof createWebhookWorker;
+};
 
-export function startWebhookProcessor(): WebhookProcessorHandle {
-  // When Redis is available, use BullMQ queue + worker instead of DB polling
-  if (getIsRedisAvailable()) {
+export function startWebhookProcessor(options: ProcessorOptions = {}): WebhookProcessorHandle {
+  const redisAvailable = options.redisAvailable ?? getIsRedisAvailable();
+  const processPending = options.processPending ?? processPendingWebhookDeliveries;
+  const interval = options.intervalMs ?? Number(process.env.WEBHOOK_PROCESSOR_INTERVAL_MS ?? 10000);
+
+  if (redisAvailable) {
     logger.info("Redis available — starting BullMQ webhook queue");
-    createWebhookQueue();
-    createWebhookWorker();
-
-    return {
-      async stop() {
-        if (processorStopped) return;
-        processorStopped = true;
-        await stopWebhookQueue();
-        logger.info("BullMQ webhook queue stopped.");
-      },
-    };
+    (options.startQueue ?? createWebhookQueue)();
+    (options.startWorker ?? createWebhookWorker)();
   }
 
-  // Fallback: DB-polled processor for local dev without Redis
-  const interval = Number(process.env.WEBHOOK_PROCESSOR_INTERVAL_MS ?? 10000);
-
-  logger.info({ interval }, "Starting DB-polled webhook processor (no Redis)");
+  // SQL-scheduled retries must still be swept when Redis is available, so
+  // BullMQ and the poller share the same atomic status claim.
+  logger.info({ interval, redisAvailable }, "Starting DB-polled webhook processor");
   processorStopped = false;
-
   processorInterval = setInterval(() => {
     if (!processorInFlight) {
-      runWebhookProcessorTick();
+      processorInFlight = processPending()
+        .catch((err) => {
+          logger.error({ err }, "Error in webhook processor run");
+        })
+        .finally(() => {
+          processorInFlight = null;
+        });
     }
   }, interval);
 
@@ -152,6 +148,9 @@ export function startWebhookProcessor(): WebhookProcessorHandle {
       }
       if (processorInFlight) {
         await processorInFlight;
+      }
+      if (redisAvailable) {
+        await stopWebhookQueue();
       }
       logger.info("Webhook processor stopped.");
     },
