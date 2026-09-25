@@ -333,12 +333,14 @@ export default async function ProfilePage({ params }: PageProps) {
         </div>
 
         <aside className="sticky top-24">
-          <SupportPanel
-            walletAddress={profile.walletAddress}
-            acceptedAssets={profile.acceptedAssets}
-            profileId={profile.id}
-            recipientDisplayName={profile.displayName}
-          />
+          <div id="support" className="scroll-mt-28">
+            <SupportPanel
+              walletAddress={profile.walletAddress}
+              acceptedAssets={profile.acceptedAssets}
+              profileId={profile.id}
+              recipientDisplayName={profile.displayName}
+            />
+          </div>
 
           {leaderboard.length > 0 ? (
             <div className="mt-6 rounded-3xl border border-white/5 bg-white/[0.02] p-6">
@@ -374,7 +376,7 @@ export default async function ProfilePage({ params }: PageProps) {
                 title="Be the first to support this creator."
                 description="This profile hasn't received support yet."
                 ctaLabel="Support Creator"
-                ctaHref={`/profile/${profile.username}`}
+                ctaHref="#support"
               />
             </div>
           )}

@@ -12,6 +12,12 @@ export const metadata: Metadata = {
       "Learn how NovaSupport handles your data on the Stellar-native creator support platform.",
     type: "website",
   },
+  twitter: {
+    card: "summary",
+    title: "Privacy Policy · NovaSupport",
+    description:
+      "Learn how NovaSupport handles your data on the Stellar-native creator support platform.",
+  },
 };
 
 export default function PrivacyPage() {
