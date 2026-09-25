@@ -33,6 +33,9 @@ pub enum Error {
     // Storage and data errors (400-499)
     RecipientNotFound = 402,
     ZeroBalance = 403,
+
+    // Arithmetic errors (500-599)
+    Overflow = 500,
 }
 
 #[derive(Clone)]
@@ -179,12 +182,12 @@ pub fn unpause(e: Env) -> Result<(), Error> {
         // Effects: update all counters BEFORE the external token transfer (CEI)
         let st = e.storage().persistent();
         let ct: u32 = st.get(&DataKey::SupportCount).unwrap_or(0);
-        let nct = ct + 1;
+        let nct = ct.checked_add(1).ok_or(Error::Overflow)?;
         st.set(&DataKey::SupportCount, &nct);
         st.extend_ttl(&DataKey::SupportCount, LEDGERS_THRESHOLD, LEDGERS_TO_LIVE);
 
         let rct: u32 = st.get(&DataKey::RecipientCount(r.clone())).unwrap_or(0);
-        let nrct = rct + 1;
+        let nrct = rct.checked_add(1).ok_or(Error::Overflow)?;
         st.set(&DataKey::RecipientCount(r.clone()), &nrct);
         st.extend_ttl(
             &DataKey::RecipientCount(r.clone()),
@@ -194,7 +197,8 @@ pub fn unpause(e: Env) -> Result<(), Error> {
 
         let total_key = DataKey::RecipientTotal(r.clone(), asset.clone());
         let total: i128 = st.get(&total_key).unwrap_or(0);
-        st.set(&total_key, &(total + o));
+        let new_total = total.checked_add(o).ok_or(Error::Overflow)?;
+        st.set(&total_key, &new_total);
         st.extend_ttl(&total_key, LEDGERS_THRESHOLD, LEDGERS_TO_LIVE);
 
         let tt = symbol_short!("support");
@@ -357,6 +361,8 @@ mod test {
             &String::from_str(&e, "Second support"),
         );
 
+        // Verify support_count() returns the correct global count
+        assert_eq!(client.support_count(), 2);
         assert_eq!(
             client.get_total_by_asset(&recipient, &asset),
             8_000_000_i128
@@ -1057,6 +1063,17 @@ mod test {
         let client = SupportPageContractClient::new(&e, &contract_id);
 
         client.pause();
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #201)")] // Error::ContractNotInitialized
+    fn unpause_without_initialization() {
+        let e = Env::default();
+        e.mock_all_auths();
+        let contract_id = e.register(SupportPageContract, ());
+        let client = SupportPageContractClient::new(&e, &contract_id);
+
+        client.unpause();
     }
 
     #[test]

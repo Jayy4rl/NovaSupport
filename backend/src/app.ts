@@ -292,6 +292,7 @@ function createRateLimiters() {
     standardHeaders: true,
     legacyHeaders: false,
     skip: () => process.env.NODE_ENV === "test",
+    keyGenerator: (req: any) => `${req.ip}-${req.params.username}`,
     message: { error: "Too many requests, please try again later." },
   });
 
