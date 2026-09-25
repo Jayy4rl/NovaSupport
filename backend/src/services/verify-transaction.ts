@@ -12,6 +12,7 @@ export interface ExpectedTxDetails {
 const verificationCache = new Map<string, { result: boolean; timestamp: number }>();
 export const VERIFICATION_CACHE_TTL = 60 * 60 * 1000; // 1 hour
 export const NEGATIVE_CACHE_TTL = 30 * 1000; // 30 seconds for false/error results
+const OPERATIONS_PAGE_SIZE = 100;
 // Bound the cache to prevent unbounded memory growth — one entry per unique
 // (txHash, expected) key, accumulated indefinitely otherwise (#923)
 export const VERIFICATION_CACHE_MAX_SIZE = 5000;
@@ -57,69 +58,74 @@ async function validatePaymentDetails(
   txHash: string,
   expected: ExpectedTxDetails
 ): Promise<boolean> {
-  const ops = await server.operations().forTransaction(txHash).call();
+  const operationRequest = server.operations().forTransaction(txHash);
+  const limitedRequest =
+    "limit" in operationRequest
+      ? operationRequest.limit(OPERATIONS_PAGE_SIZE)
+      : operationRequest;
+  let ops = await limitedRequest.call();
 
-  for (const op of ops.records) {
-    if (op.type === "payment") {
-      const p = op as unknown as {
-        to: string;
-        amount: string;
-        asset_type: string;
-        asset_code?: string;
-        asset_issuer?: string;
-      };
-      if (
-        p.to === expected.recipientAddress &&
-        normalizeAmount(p.amount) === normalizeAmount(expected.amount) &&
-        isAssetMatch(p, expected.assetCode, expected.assetIssuer)
-      ) {
-        return true;
+  while (true) {
+    for (const op of ops.records) {
+      if (op.type === "payment") {
+        const p = op as unknown as {
+          to: string;
+          amount: string;
+          asset_type: string;
+          asset_code?: string;
+          asset_issuer?: string;
+        };
+        if (
+          p.to === expected.recipientAddress &&
+          normalizeAmount(p.amount) === normalizeAmount(expected.amount) &&
+          isAssetMatch(p, expected.assetCode, expected.assetIssuer)
+        ) {
+          return true;
+        }
       }
-    }
 
-    if (op.type === "create_account") {
-      const c = op as unknown as { account: string; starting_balance: string };
-      const wantNative = expected.assetCode === "XLM" || expected.assetCode === "native";
-      if (
-        wantNative &&
-        c.account === expected.recipientAddress &&
-        normalizeAmount(c.starting_balance) === normalizeAmount(expected.amount)
-      ) {
-        return true;
+      if (op.type === "create_account") {
+        const c = op as unknown as { account: string; starting_balance: string };
+        const wantNative = expected.assetCode === "XLM" || expected.assetCode === "native";
+        if (
+          wantNative &&
+          c.account === expected.recipientAddress &&
+          normalizeAmount(c.starting_balance) === normalizeAmount(expected.amount)
+        ) {
+          return true;
+        }
       }
-    }
 
-    // Path payments: the destination asset and amount received are what matter
-    // for the recipient, not the source asset the sender used.
-    if (
-      op.type === "path_payment_strict_send" ||
-      op.type === "path_payment_strict_receive"
-    ) {
-      const p = op as unknown as {
-        to: string;
-        // path_payment_strict_send: amount received by destination
-        destination_amount?: string;
-        // path_payment_strict_receive: the exact amount the destination receives
-        amount?: string;
-        asset_type: string;
-        asset_code?: string;
-        asset_issuer?: string;
-      };
-      // The received amount field differs between the two op types
-      const receivedAmount =
+      if (
+        op.type === "path_payment_strict_send" ||
         op.type === "path_payment_strict_receive"
-          ? p.amount
-          : p.destination_amount;
-
-      if (
-        p.to === expected.recipientAddress &&
-        receivedAmount !== undefined &&
-        normalizeAmount(receivedAmount) === normalizeAmount(expected.amount) &&
-        isAssetMatch(p, expected.assetCode, expected.assetIssuer)
       ) {
-        return true;
+        const p = op as unknown as {
+          to: string;
+          destination_amount?: string;
+          amount?: string;
+          asset_type: string;
+          asset_code?: string;
+          asset_issuer?: string;
+        };
+        const receivedAmount =
+          op.type === "path_payment_strict_receive"
+            ? p.amount
+            : p.destination_amount;
+
+        if (
+          p.to === expected.recipientAddress &&
+          receivedAmount !== undefined &&
+          normalizeAmount(receivedAmount) === normalizeAmount(expected.amount) &&
+          isAssetMatch(p, expected.assetCode, expected.assetIssuer)
+        ) {
+          return true;
+        }
       }
     }
+
+    if (!("next" in ops) || typeof ops.next !== "function") break;
+    ops = await ops.next();
   }
 
   return false;

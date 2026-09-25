@@ -235,6 +235,17 @@ type AssetBreakdownEntry = {
   percentage: number;
 };
 
+function getDominantAssetCode(
+  entries: AssetBreakdownEntry[],
+  fallback = "XLM",
+): string {
+  return entries.reduce<AssetBreakdownEntry | null>(
+    (dominant, entry) =>
+      dominant === null || entry.amount > dominant.amount ? entry : dominant,
+    null,
+  )?.assetCode ?? fallback;
+}
+
 type RecurringDrip = {
   id: string;
   profileId?: string;
@@ -700,13 +711,7 @@ export default function DashboardPage() {
             {/* #820: use dominant asset code instead of hardcoding XLM */}
             <StatCard
               title="Total Raised"
-              value={`${data.summary.totalRaised.toLocaleString()} ${
-                assetBreakdown.length > 0
-                  ? assetBreakdown.reduce((a, b) =>
-                      a.amount >= b.amount ? a : b
-                    ).assetCode
-                  : "XLM"
-              }`}
+              value={`${data.summary.totalRaised.toLocaleString()} ${getDominantAssetCode(assetBreakdown)}`}
               icon={<Wallet className="text-mint" />}
               trend={trends.totalRaised}
               positive={trends.totalRaisedPositive}
@@ -720,13 +725,7 @@ export default function DashboardPage() {
             />
             <StatCard
               title="Avg. Support"
-              value={`${data.summary.avgContribution} ${
-                assetBreakdown.length > 0
-                  ? assetBreakdown.reduce((a, b) =>
-                      a.amount >= b.amount ? a : b
-                    ).assetCode
-                  : "XLM"
-              }`}
+              value={`${data.summary.avgContribution} ${getDominantAssetCode(assetBreakdown)}`}
               icon={<TrendingUp className="text-gold" />}
               trend="—"
               positive={true}

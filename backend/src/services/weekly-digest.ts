@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "../db.js";
 import { sendEmail as defaultSendEmail } from "../mailer.js";
 import { logger } from "../logger.js";
@@ -166,51 +167,34 @@ export async function sendWeeklyDigests(
 const WEEKLY_DIGEST_JOB_NAME = "weekly-digest";
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
-/**
- * Read the persisted last-run timestamp from the database.
- * Returns null when no record exists (i.e. the job has never run).
- */
-async function getLastDigestRunAt(): Promise<Date | null> {
-  const row = await prisma.schedulerJob.findUnique({
-    where: { name: WEEKLY_DIGEST_JOB_NAME },
-  });
-  return row?.lastRunAt ?? null;
+async function claimWeeklyDigestRun(
+  prismaClient = prisma,
+  now = new Date(),
+): Promise<boolean> {
+  const dueBefore = new Date(now.getTime() - SEVEN_DAYS_MS);
+  const claimed = await prismaClient.$queryRaw<Array<{ name: string }>>(Prisma.sql`
+    INSERT INTO "scheduler_jobs" ("name", "lastRunAt", "updatedAt")
+    VALUES (${WEEKLY_DIGEST_JOB_NAME}, ${now}, ${now})
+    ON CONFLICT ("name") DO UPDATE
+      SET "lastRunAt" = EXCLUDED."lastRunAt", "updatedAt" = EXCLUDED."updatedAt"
+      WHERE "scheduler_jobs"."lastRunAt" <= ${dueBefore}
+    RETURNING "name"
+  `);
+  return claimed.length > 0;
 }
 
 /**
- * Persist the current time as the last-run timestamp for the weekly digest.
- * Called immediately after a successful digest run so that a subsequent
- * process restart does not re-fire the job prematurely (#592).
- */
-async function markDigestRunAt(at: Date): Promise<void> {
-  await prisma.schedulerJob.upsert({
-    where: { name: WEEKLY_DIGEST_JOB_NAME },
-    create: { name: WEEKLY_DIGEST_JOB_NAME, lastRunAt: at },
-    update: { lastRunAt: at },
-  });
-}
-
-/**
- * Run the weekly digest only if at least 7 days have elapsed since the last
- * successful run. Guards against re-firing on every process restart (#592).
+ * Claim and run the weekly digest only if at least 7 days have elapsed since
+ * the previous claim.
  */
 async function maybeRunWeeklyDigest(): Promise<void> {
-  const lastRunAt = await getLastDigestRunAt();
-  const now = Date.now();
-
-  if (lastRunAt !== null && now - lastRunAt.getTime() < SEVEN_DAYS_MS) {
-    const msUntilDue = SEVEN_DAYS_MS - (now - lastRunAt.getTime());
-    const hoursUntilDue = Math.ceil(msUntilDue / (60 * 60 * 1000));
-    logger.info(
-      { lastRunAt, hoursUntilDue },
-      "Weekly digest skipped — not yet due",
-    );
+  const runAt = new Date();
+  if (!(await claimWeeklyDigestRun(prisma, runAt))) {
+    logger.info("Weekly digest skipped — not yet due or already claimed");
     return;
   }
 
-  const runAt = new Date(now);
   await sendWeeklyDigests();
-  await markDigestRunAt(runAt);
 }
 
 let digestInterval: ReturnType<typeof setInterval> | null = null;

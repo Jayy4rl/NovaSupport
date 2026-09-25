@@ -269,6 +269,44 @@ async function suiteDetailValidation() {
     };
     assert.strictEqual(await verifyTransaction(server, "abc", 3, 10, expected), true);
   });
+
+  await test("paginates operations beyond the first page", async () => {
+    let requestedLimit = 0;
+    const payment = {
+      type: "payment",
+      to: DUMMY_RECIPIENT,
+      amount: "10.0000000",
+      asset_type: "native",
+    };
+    const secondPage = { records: [payment] };
+    const firstPage = {
+      records: [],
+      next: async () => secondPage,
+    };
+    const server = {
+      transactions: () => ({
+        transaction: () => ({
+          call: async () => successTx,
+        }),
+      }),
+      operations: () => ({
+        forTransaction: () => ({
+          limit: (value: number) => {
+            requestedLimit = value;
+            return { call: async () => firstPage };
+          },
+        }),
+      }),
+    } as unknown as Horizon.Server;
+    const expected: ExpectedTxDetails = {
+      amount: "10",
+      recipientAddress: DUMMY_RECIPIENT,
+      assetCode: "XLM",
+    };
+
+    assert.strictEqual(await verifyTransaction(server, "paged-hash", 3, 10, expected), true);
+    assert.equal(requestedLimit, 100);
+  });
 }
 
 async function suiteCaching() {
