@@ -18,6 +18,18 @@ export function AuthExpiredListener() {
     return () => window.removeEventListener("auth:expired", handleExpired);
   }, []);
 
+  useEffect(() => {
+    if (!expired) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setExpired(false);
+        router.replace("/");
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [expired, router]);
+
   if (!expired) return null;
 
   return (
